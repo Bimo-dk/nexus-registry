@@ -5,6 +5,7 @@ import { getAllRemotes } from './store.js';
 type ServerMessage =
   | { type: 'welcome'; timestamp: string; clients: number }
   | { type: 'remotes_changed'; timestamp: string; remotes: unknown[]; trigger: string }
+  | { type: 'system_health'; timestamp: string; snapshot: unknown }
   | { type: 'pong'; timestamp: string };
 
 const WS_PATH = '/ws';
@@ -100,4 +101,21 @@ function safeSend(ws: WebSocket, msg: ServerMessage): void {
 
 export function getConnectionCount(): number {
   return clients.size;
+}
+
+export function broadcastSystemHealth(snapshot: unknown): void {
+  if (clients.size === 0) return;
+  const msg: ServerMessage = {
+    type: 'system_health',
+    timestamp: new Date().toISOString(),
+    snapshot,
+  };
+  const data = JSON.stringify(msg);
+  for (const client of clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(data, (err) => {
+        if (err) console.error('[ws] system_health send error:', err.message);
+      });
+    }
+  }
 }

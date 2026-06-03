@@ -5,10 +5,13 @@ import morgan from 'morgan';
 import { nexusTokenAuth } from './middleware/auth.js';
 import { correlationMiddleware, CORRELATION_HEADER, cid } from './correlation.js';
 import { remotesRouter } from './routes/remotes.js';
+import { systemRouter } from './routes/system.js';
 import { loadRegistry } from './store.js';
 import { attachWebSocketServer, getConnectionCount } from './websocket.js';
+import { startHealthCheckLoop } from './system-health.js';
 
 const PORT = Number(process.env.PORT ?? 3000);
+const HEALTH_INTERVAL_MS = Number(process.env.HEALTH_CHECK_INTERVAL_MS ?? 30_000);
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '')
   .split(',')
   .map((s) => s.trim())
@@ -45,6 +48,7 @@ app.get('/health', (_req: Request, res: Response) => {
 });
 
 app.use('/api/remotes', nexusTokenAuth, remotesRouter);
+app.use('/api/system', nexusTokenAuth, systemRouter);
 
 app.use((req: Request, res: Response) => {
   res.status(404).json({ error: 'not_found', message: 'Route not found', correlationId: cid(req) });
@@ -76,6 +80,7 @@ async function start(): Promise<void> {
     console.log(`[registry] Listening on http://0.0.0.0:${PORT}`);
     console.log(`[registry] WebSocket on ws://0.0.0.0:${PORT}/ws`);
     console.log(`[registry] Allowed CORS origins: ${ALLOWED_ORIGINS.join(', ') || '(any)'}`);
+    startHealthCheckLoop(HEALTH_INTERVAL_MS);
   });
 }
 
