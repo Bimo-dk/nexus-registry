@@ -11,7 +11,7 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@bimo-nexus/core": "file:../nexus-packages/packages/core",
+    "@bimo-dk/nexus-core": "^0.1.0",
     "cors": "^2.8.5",
     "express": "^5.0.1",
     "morgan": "^1.10.0",

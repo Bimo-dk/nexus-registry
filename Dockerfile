@@ -1,26 +1,16 @@
 # ============================================================================
-# nexus-registry — bygges fra projekt-rod-context fordi @bimo-nexus/core via
-# file:../nexus-packages/packages/core kun resolves når begge ligger på samme
-# relative niveau som på host-fs.
+# nexus-registry — Node 22 + Express. Pakker fra GitHub Packages.
 # ============================================================================
 
 FROM node:22-alpine AS builder
+WORKDIR /app
 
-# ----- Build @bimo-nexus/core (file: dep) -----
-WORKDIR /workspace/nexus-packages/packages/core
-COPY nexus-packages/packages/core/package*.json ./
-RUN npm install --no-audit --no-fund --legacy-peer-deps
-COPY nexus-packages/packages/core/tsconfig.json ./
-COPY nexus-packages/packages/core/tsup.config.ts ./
-COPY nexus-packages/packages/core/src ./src
-RUN npm run build
+ARG NODE_AUTH_TOKEN
+COPY package*.json .npmrc tsconfig.json ./
+RUN if [ -z "$NODE_AUTH_TOKEN" ]; then echo "NODE_AUTH_TOKEN build-arg er paakraevet"; exit 1; fi && \
+    NODE_AUTH_TOKEN=${NODE_AUTH_TOKEN} npm install --no-audit --no-fund --legacy-peer-deps
 
-# ----- Build nexus-registry -----
-WORKDIR /workspace/nexus-registry
-COPY nexus-registry/package*.json ./
-COPY nexus-registry/tsconfig.json ./
-RUN npm install --no-audit --no-fund --legacy-peer-deps
-COPY nexus-registry/src ./src
+COPY src ./src
 RUN npm run build
 
 # ============================================================================
@@ -30,17 +20,16 @@ FROM node:22-alpine
 RUN apk add --no-cache wget
 ENV NODE_ENV=production
 ENV PORT=3000
+WORKDIR /app
 
-# Behold samme /workspace struktur så file: deps stadig resolves i runtime
-WORKDIR /workspace/nexus-packages/packages/core
-COPY --from=builder /workspace/nexus-packages/packages/core/package.json ./
-COPY --from=builder /workspace/nexus-packages/packages/core/dist ./dist
+ARG NODE_AUTH_TOKEN
+COPY package*.json .npmrc ./
+RUN NODE_AUTH_TOKEN=${NODE_AUTH_TOKEN} npm install --omit=dev --no-audit --no-fund --legacy-peer-deps && \
+    rm -f .npmrc && \
+    npm cache clean --force
 
-WORKDIR /workspace/nexus-registry
-COPY --from=builder /workspace/nexus-registry/package.json ./
-COPY --from=builder /workspace/nexus-registry/dist ./dist
-COPY nexus-registry/src/data ./data
-RUN npm install --omit=dev --no-audit --no-fund --legacy-peer-deps && npm cache clean --force
+COPY --from=builder /app/dist ./dist
+COPY src/data ./data
 
 EXPOSE 3000
 

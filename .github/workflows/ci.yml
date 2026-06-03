@@ -9,15 +9,19 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'npm'
-      - name: Install dependencies
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@bimo-dk'
+      - name: Install deps fra GitHub Packages
         run: npm install --no-audit --no-fund --legacy-peer-deps
-      - name: Type check + build
-        run: npm run build
-      - name: Test (if present)
-        run: npm test --if-present
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: npm run build
+      - run: npm test --if-present
