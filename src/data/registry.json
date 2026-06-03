@@ -1,0 +1,20 @@
+{
+  "remotes": [
+    {
+      "name": "remoteOne",
+      "url": "/remotes/remoteOne/remoteEntry.json",
+      "exposedModule": "./RemoteEntry",
+      "routePath": "remote-one",
+      "enabled": true,
+      "addedAt": "2025-01-01T00:00:00.000Z"
+    },
+    {
+      "name": "remoteTwo",
+      "url": "/remotes/remoteTwo/remoteEntry.json",
+      "exposedModule": "./RemoteEntry",
+      "routePath": "remote-two",
+      "enabled": true,
+      "addedAt": "2025-01-01T00:00:00.000Z"
+    }
+  ]
+}
