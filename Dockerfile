@@ -1,14 +1,17 @@
+# syntax=docker/dockerfile:1.7
 # ============================================================================
 # nexus-registry — Node 22 + Express. Pakker fra GitHub Packages.
+# Bruger BuildKit secrets så NODE_AUTH_TOKEN IKKE leakes i build-logs.
 # ============================================================================
 
 FROM node:22-alpine AS builder
 WORKDIR /app
 
-ARG NODE_AUTH_TOKEN
 COPY package*.json .npmrc tsconfig.json ./
-RUN if [ -z "$NODE_AUTH_TOKEN" ]; then echo "NODE_AUTH_TOKEN build-arg er paakraevet"; exit 1; fi && \
-    NODE_AUTH_TOKEN=${NODE_AUTH_TOKEN} npm install --no-audit --no-fund --legacy-peer-deps
+
+RUN --mount=type=secret,id=node_auth_token,required=true \
+    NODE_AUTH_TOKEN=$(cat /run/secrets/node_auth_token) \
+    npm install --no-audit --no-fund --legacy-peer-deps
 
 COPY src ./src
 RUN npm run build
@@ -22,9 +25,11 @@ ENV NODE_ENV=production
 ENV PORT=3000
 WORKDIR /app
 
-ARG NODE_AUTH_TOKEN
 COPY package*.json .npmrc ./
-RUN NODE_AUTH_TOKEN=${NODE_AUTH_TOKEN} npm install --omit=dev --no-audit --no-fund --legacy-peer-deps && \
+
+RUN --mount=type=secret,id=node_auth_token,required=true \
+    NODE_AUTH_TOKEN=$(cat /run/secrets/node_auth_token) \
+    npm install --omit=dev --no-audit --no-fund --legacy-peer-deps && \
     rm -f .npmrc && \
     npm cache clean --force
 
