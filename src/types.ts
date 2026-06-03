@@ -1,5 +1,5 @@
-// MIGRATION: Alle typer kommer nu fra @bimo-dk/nexus-core (single source of truth).
-// Lokale registry-interne typer (fx RegistryFile som ikke er en del af det offentlige API) bliver.
+// MIGRATION: All types now come from @bimo-dk/nexus-core (single source of truth).
+// Registry-internal types (e.g. RegistryFile which is not part of the public API) remain here.
 
 export type {
   RemoteConfig,
@@ -12,7 +12,7 @@ export type {
 
 import type { RemoteConfig } from '@bimo-dk/nexus-core';
 
-/** Internal disk-layout — ikke i det offentlige API, kun registry-intern. */
+/** Internal disk layout — not part of the public API, registry-internal only. */
 export interface RegistryFile {
   remotes: RemoteConfig[];
 }

@@ -35,7 +35,7 @@ let pollTimer: NodeJS.Timeout | null = null;
 
 /**
  * Parse SYSTEM_SERVICES env-var. Format: 'name=url,name=url'
- * Eksempel: 'gateway=http://gateway/health,host=http://host/health'
+ * Example: 'gateway=http://gateway/health,host=http://host/health'
  */
 function parseSystemServices(): SystemService[] {
   const raw = process.env.SYSTEM_SERVICES ?? 'gateway=http://gateway/health,host=http://host/health';
@@ -57,14 +57,14 @@ function parseSystemServices(): SystemService[] {
 const SYSTEM_SERVICES = parseSystemServices();
 
 /**
- * Konverter remote-konfigurationens browser-URL (relativ eller absolut) til
- * den interne Docker-DNS URL registry kan pinge serverside.
+ * Convert the remote configuration's browser URL (relative or absolute) to
+ * the internal Docker-DNS URL the registry can ping server-side.
  *
- * Konvention: remote 'remoteOne' → host 'remote-one' (camelCase → kebab-case).
- * Override muligt senere via remote.internalHealthUrl felt hvis behov.
+ * Convention: remote 'remoteOne' -> host 'remote-one' (camelCase -> kebab-case).
+ * Override possible later via remote.internalHealthUrl field if needed.
  */
 function deriveInternalHealthUrl(remote: RemoteConfig): string {
-  // CamelCase → kebab-case + /health
+  // camelCase -> kebab-case + /health
   const kebab = remote.name.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
   return `http://${kebab}/health`;
 }
@@ -93,8 +93,8 @@ function statusFromLatency(ok: boolean, latencyMs: number): RemoteHealthStatus {
 }
 
 /**
- * Kør én komplet sundheds-runde for alle kendte services.
- * Returnerer snapshot OG opdaterer remote.healthStatus i store.
+ * Run one complete health round for all known services.
+ * Returns a snapshot AND updates remote.healthStatus in the store.
  */
 export async function runHealthCheckCycle(): Promise<SystemHealthSnapshot> {
   const now = new Date().toISOString();
@@ -126,7 +126,7 @@ export async function runHealthCheckCycle(): Promise<SystemHealthSnapshot> {
     }),
   );
 
-  // 3. Remotes (fra registry data)
+  // 3. Remotes (from registry data)
   const remotes = await getAllRemotes();
   const remoteChecks = await Promise.all(
     remotes.map(async (remote): Promise<ServiceHealth> => {
@@ -143,7 +143,7 @@ export async function runHealthCheckCycle(): Promise<SystemHealthSnapshot> {
       const r = await checkHealth(url);
       const status = statusFromLatency(r.ok, r.latencyMs);
 
-      // Opdater remote i store så /api/remotes også viser det
+      // Update remote in store so /api/remotes also reflects it
       try {
         await updateRemote(remote.name, { healthStatus: status, lastHealthCheck: now });
       } catch {

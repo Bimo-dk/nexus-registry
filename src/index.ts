@@ -9,6 +9,12 @@ import { systemRouter } from './routes/system.js';
 import { loadRegistry } from './store.js';
 import { attachWebSocketServer, getConnectionCount } from './websocket.js';
 import { startHealthCheckLoop } from './system-health.js';
+import { captureConsole } from './observability/log-buffer.js';
+import { metricsMiddleware } from './observability/metrics.js';
+
+// Capture all console.* output into the ring buffer for /api/system/logs.
+// Must run before any other module logs.
+captureConsole();
 
 const PORT = Number(process.env.PORT ?? 3000);
 const HEALTH_INTERVAL_MS = Number(process.env.HEALTH_CHECK_INTERVAL_MS ?? 30_000);
@@ -35,6 +41,7 @@ app.use(
 );
 
 app.use(correlationMiddleware);
+app.use(metricsMiddleware);
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
