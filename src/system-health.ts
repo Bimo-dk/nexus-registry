@@ -57,14 +57,15 @@ function parseSystemServices(): SystemService[] {
 const SYSTEM_SERVICES = parseSystemServices();
 
 /**
- * Convert the remote configuration's browser URL (relative or absolute) to
- * the internal Docker-DNS URL the registry can ping server-side.
- *
- * Convention: remote 'remoteOne' -> host 'remote-one' (camelCase -> kebab-case).
- * Override possible later via remote.internalHealthUrl field if needed.
+ * Derive the health URL the registry can reach server-side.
+ * Prefers remote.upstreamUrl (the Docker-internal URL) when set.
+ * Falls back to camelCase → kebab-case name convention.
  */
 function deriveInternalHealthUrl(remote: RemoteConfig): string {
-  // camelCase -> kebab-case + /health
+  if (remote.upstreamUrl) {
+    const base = remote.upstreamUrl.replace(/\/$/, '');
+    return `${base}/health`;
+  }
   const kebab = remote.name.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
   return `http://${kebab}/health`;
 }
