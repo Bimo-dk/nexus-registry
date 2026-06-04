@@ -41,7 +41,7 @@ remotesRouter.post('/', async (req: Request, res: Response) => {
     return;
   }
 
-  const { name, url, routePath } = body;
+  const { name, url, routePath, upstreamUrl } = body;
   const exposedModule = body.exposedModule ?? './RemoteEntry';
   const enabled = body.enabled ?? true;
 
@@ -59,6 +59,7 @@ remotesRouter.post('/', async (req: Request, res: Response) => {
     routePath: routePath!,
     enabled,
     addedAt: new Date().toISOString(),
+    ...(upstreamUrl ? { upstreamUrl } : {}),
   };
 
   try {
