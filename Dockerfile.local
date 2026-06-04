@@ -7,7 +7,7 @@ WORKDIR /app
 
 COPY package*.json tsconfig.json ./
 RUN printf '@bimo-dk:registry=http://host.docker.internal:4873\nlegacy-peer-deps=true\n' > .npmrc
-RUN npm install --no-audit --no-fund --legacy-peer-deps
+RUN rm -f package-lock.json && npm install --no-audit --no-fund --legacy-peer-deps
 
 COPY src ./src
 RUN npm run build

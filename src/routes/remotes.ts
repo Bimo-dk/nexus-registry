@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from 'express';
+import { isValidRemoteName, isValidRoutePath, isValidUrlOrPath } from '@bimo-dk/nexus-core';
 import {
   addRemote,
   deleteRemote,
@@ -11,9 +12,6 @@ import {
 import { cid } from '../correlation.js';
 import { broadcastRemotesChanged } from '../websocket.js';
 import type { AddRemoteRequest, RemoteConfig, UpdateRemoteRequest } from '../types.js';
-
-const NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9]*$/;
-const ROUTE_PATTERN = /^[a-z0-9-]+$/;
 
 export const remotesRouter = Router();
 
@@ -85,8 +83,8 @@ remotesRouter.put('/:name', async (req: Request, res: Response) => {
     return;
   }
 
-  if (body.routePath !== undefined && !ROUTE_PATTERN.test(body.routePath)) {
-    res.status(400).json({ error: 'validation_failed', message: 'routePath must be kebab-case', correlationId: cid(req) });
+  if (body.routePath !== undefined && !isValidRoutePath(body.routePath)) {
+    res.status(400).json({ error: 'validation_failed', message: 'routePath must be kebab-case starting with a lowercase letter', correlationId: cid(req) });
     return;
   }
   if (body.url !== undefined && !isValidUrlOrPath(body.url)) {
@@ -148,28 +146,17 @@ function validateNewRemote(input: {
   routePath: string | undefined;
   exposedModule: string;
 }): string | null {
-  if (!input.name || !NAME_PATTERN.test(input.name)) {
-    return 'name must be camelCase, starting with a letter';
+  if (!input.name || !isValidRemoteName(input.name)) {
+    return 'name must be camelCase starting with a lowercase letter';
   }
   if (!input.url || !isValidUrlOrPath(input.url)) {
     return 'url must be a valid http(s) URL or absolute path (starting with /)';
   }
-  if (!input.routePath || !ROUTE_PATTERN.test(input.routePath)) {
-    return 'routePath must be kebab-case';
+  if (!input.routePath || !isValidRoutePath(input.routePath)) {
+    return 'routePath must be kebab-case starting with a lowercase letter';
   }
   if (!input.exposedModule.startsWith('./')) {
     return 'exposedModule must start with "./"';
   }
   return null;
-}
-
-function isValidUrlOrPath(value: string): boolean {
-  // Tillad relative paths starting with /
-  if (value.startsWith('/')) return true;
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-  } catch {
-    return false;
-  }
 }
