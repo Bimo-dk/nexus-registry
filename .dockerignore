@@ -1,6 +1,8 @@
-node_modules
-dist
-npm-debug.log
+target
+*.log
 .env
 .env.local
-*.log
+.git
+.github
+.idea
+.vscode
