@@ -39,10 +39,10 @@ impl EnvConfig {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        let system_services = parse_system_services(
-            &env::var("SYSTEM_SERVICES")
-                .unwrap_or_else(|_| "gateway=http://gateway:8668/health,host=http://host/health".to_string()),
-        );
+        let system_services =
+            parse_system_services(&env::var("SYSTEM_SERVICES").unwrap_or_else(|_| {
+                "gateway=http://gateway:8668/health,host=http://host/health".to_string()
+            }));
         let health_interval_ms = env::var("HEALTH_CHECK_INTERVAL_MS")
             .ok()
             .and_then(|s| s.parse().ok())
