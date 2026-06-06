@@ -470,8 +470,7 @@ fn row_to_remote(r: &sqlx::any::AnyRow) -> Result<RemoteConfig, sqlx::Error> {
 /// The second element of the tuple is the total count of matching rows
 /// (pre-pagination); when `page` is `None` it equals the returned vec length.
 pub async fn list(db: &Db, page: Option<&ListPage>) -> Result<(Vec<RemoteConfig>, u64), StoreError> {
-    const BASE: &str =
-        "SELECT name, url, exposed_module, route_path, enabled, added_at, upstream_url, \
+    const BASE: &str = "SELECT name, url, exposed_module, route_path, enabled, added_at, upstream_url, \
          health_status, last_health_check, visibility FROM remotes ORDER BY added_at";
     match page {
         None => {
@@ -479,7 +478,8 @@ pub async fn list(db: &Db, page: Option<&ListPage>) -> Result<(Vec<RemoteConfig>
             let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
                 .fetch_all(db.pool())
                 .await?;
-            let items: Vec<RemoteConfig> = rows.iter()
+            let items: Vec<RemoteConfig> = rows
+                .iter()
                 .map(row_to_remote)
                 .collect::<Result<_, sqlx::Error>>()
                 .map_err(StoreError::Db)?;
@@ -497,7 +497,8 @@ pub async fn list(db: &Db, page: Option<&ListPage>) -> Result<(Vec<RemoteConfig>
                 .bind(p.offset as i64)
                 .fetch_all(db.pool())
                 .await?;
-            let items: Vec<RemoteConfig> = rows.iter()
+            let items: Vec<RemoteConfig> = rows
+                .iter()
                 .map(row_to_remote)
                 .collect::<Result<_, sqlx::Error>>()
                 .map_err(StoreError::Db)?;
@@ -513,8 +514,7 @@ pub async fn list_for_host(
     page: Option<&ListPage>,
 ) -> Result<(Vec<RemoteConfig>, u64), StoreError> {
     let host_visibility = format!("host:{}", host_id);
-    const BASE: &str =
-        "SELECT name, url, exposed_module, route_path, enabled, added_at, upstream_url, \
+    const BASE: &str = "SELECT name, url, exposed_module, route_path, enabled, added_at, upstream_url, \
          health_status, last_health_check, visibility FROM remotes \
          WHERE visibility = 'global' OR visibility = ? ORDER BY added_at";
     match page {
@@ -524,7 +524,8 @@ pub async fn list_for_host(
                 .bind(&host_visibility)
                 .fetch_all(db.pool())
                 .await?;
-            let items: Vec<RemoteConfig> = rows.iter()
+            let items: Vec<RemoteConfig> = rows
+                .iter()
                 .map(row_to_remote)
                 .collect::<Result<_, sqlx::Error>>()
                 .map_err(StoreError::Db)?;
@@ -546,7 +547,8 @@ pub async fn list_for_host(
                 .bind(p.offset as i64)
                 .fetch_all(db.pool())
                 .await?;
-            let items: Vec<RemoteConfig> = rows.iter()
+            let items: Vec<RemoteConfig> = rows
+                .iter()
                 .map(row_to_remote)
                 .collect::<Result<_, sqlx::Error>>()
                 .map_err(StoreError::Db)?;

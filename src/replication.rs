@@ -59,15 +59,16 @@ pub fn publish(db: &Db, event: &str, id: Option<&str>, trigger: &str) {
             let created_at = iso_now();
             let origin = INSTANCE_ID.clone();
             tokio::spawn(async move {
-                if let Err(e) = sqlx::query(db.dialect.prep(
-                    "INSERT INTO event_queue (id, payload, origin, created_at) VALUES (?, ?, ?, ?)",
-                ))
-                .bind(&row_id)
-                .bind(&payload)
-                .bind(&origin)
-                .bind(&created_at)
-                .execute(db.pool())
-                .await
+                if let Err(e) =
+                    sqlx::query(db.dialect.prep(
+                        "INSERT INTO event_queue (id, payload, origin, created_at) VALUES (?, ?, ?, ?)",
+                    ))
+                    .bind(&row_id)
+                    .bind(&payload)
+                    .bind(&origin)
+                    .bind(&created_at)
+                    .execute(db.pool())
+                    .await
                 {
                     warn!("[replication] event_queue insert failed: {}", e);
                 }
@@ -127,12 +128,10 @@ async fn postgres_listener(state: AppState, db_url: String) {
 }
 
 async fn mysql_poller(state: AppState) {
-    let cursor: String = sqlx::query_scalar::<_, String>(
-        "SELECT COALESCE(MAX(id), '') FROM event_queue",
-    )
-    .fetch_one(state.db.pool())
-    .await
-    .unwrap_or_default();
+    let cursor: String = sqlx::query_scalar::<_, String>("SELECT COALESCE(MAX(id), '') FROM event_queue")
+        .fetch_one(state.db.pool())
+        .await
+        .unwrap_or_default();
 
     let mut cursor = cursor;
     let mut prune_tick: u32 = 0;
@@ -141,9 +140,10 @@ async fn mysql_poller(state: AppState) {
     loop {
         sleep(Duration::from_secs(1)).await;
 
-        let sql = state.db.dialect.render(
-            "SELECT id, payload FROM event_queue WHERE id > ? ORDER BY id ASC LIMIT 50",
-        );
+        let sql = state
+            .db
+            .dialect
+            .render("SELECT id, payload FROM event_queue WHERE id > ? ORDER BY id ASC LIMIT 50");
         let rows = match sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
             .bind(&cursor)
             .fetch_all(state.db.pool())

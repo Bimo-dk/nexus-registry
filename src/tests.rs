@@ -1070,7 +1070,10 @@ async fn remotes_list_pagination_returns_page_metadata() {
         assert_eq!(res.status(), StatusCode::CREATED);
     }
 
-    let res = app.oneshot(auth_get("/api/remotes?page=1&limit=2")).await.unwrap();
+    let res = app
+        .oneshot(auth_get("/api/remotes?page=1&limit=2"))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body = json_body(res).await;
 
@@ -1123,7 +1126,12 @@ async fn remotes_list_page_two_returns_correct_slice() {
         assert_eq!(res.status(), StatusCode::CREATED);
     }
 
-    let p2 = json_body(app.oneshot(auth_get("/api/remotes?page=2&limit=2")).await.unwrap()).await;
+    let p2 = json_body(
+        app.oneshot(auth_get("/api/remotes?page=2&limit=2"))
+            .await
+            .unwrap(),
+    )
+    .await;
     assert_eq!(p2["remotes"].as_array().unwrap().len(), 2);
     assert_eq!(p2["page"], 2);
     assert_eq!(p2["total"], 5);
@@ -1309,8 +1317,19 @@ async fn bulk_toggle_hosts_sets_enabled_state() {
     let body = json_body(res).await;
     assert_eq!(body["affected"], 1);
 
-    let detail_a = json_body(app.clone().oneshot(auth_get(&format!("/api/hosts/{}", id_a))).await.unwrap()).await;
-    let detail_b = json_body(app.oneshot(auth_get(&format!("/api/hosts/{}", id_b))).await.unwrap()).await;
+    let detail_a = json_body(
+        app.clone()
+            .oneshot(auth_get(&format!("/api/hosts/{}", id_a)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let detail_b = json_body(
+        app.oneshot(auth_get(&format!("/api/hosts/{}", id_b)))
+            .await
+            .unwrap(),
+    )
+    .await;
     assert_eq!(detail_a["enabled"], false);
     assert_eq!(detail_b["enabled"], true);
 }
@@ -1356,8 +1375,19 @@ async fn bulk_toggle_gates_sets_enabled_state() {
     let body = json_body(res).await;
     assert_eq!(body["affected"], 1);
 
-    let d1 = json_body(app.clone().oneshot(auth_get(&format!("/api/gates/{}", g1_id))).await.unwrap()).await;
-    let d2 = json_body(app.oneshot(auth_get(&format!("/api/gates/{}", g2_id))).await.unwrap()).await;
+    let d1 = json_body(
+        app.clone()
+            .oneshot(auth_get(&format!("/api/gates/{}", g1_id)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let d2 = json_body(
+        app.oneshot(auth_get(&format!("/api/gates/{}", g2_id)))
+            .await
+            .unwrap(),
+    )
+    .await;
     assert_eq!(d1["enabled"], false);
     assert_eq!(d2["enabled"], true);
 }
@@ -1454,8 +1484,12 @@ async fn rollback_restores_config_and_creates_new_version() {
     assert_eq!(live["url"], "/v1");
 
     // Rollback created version 3
-    let versions =
-        json_body(app.oneshot(auth_get("/api/remotes/verRb/versions")).await.unwrap()).await;
+    let versions = json_body(
+        app.oneshot(auth_get("/api/remotes/verRb/versions"))
+            .await
+            .unwrap(),
+    )
+    .await;
     assert_eq!(versions["total"], 3);
     assert_eq!(versions["versions"][0]["version"], 3);
     assert_eq!(versions["versions"][0]["url"], "/v1");
@@ -1477,7 +1511,10 @@ async fn rollback_to_nonexistent_version_returns_404() {
     assert_eq!(res.status(), StatusCode::CREATED);
 
     let res = app
-        .oneshot(auth_post("/api/remotes/ver404/rollback", json!({ "version": 99 })))
+        .oneshot(auth_post(
+            "/api/remotes/ver404/rollback",
+            json!({ "version": 99 }),
+        ))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -1516,7 +1553,9 @@ async fn audit_log_records_remote_create() {
 
     let body = json_body(app.oneshot(auth_get("/api/system/audit")).await.unwrap()).await;
     let entries = body["entries"].as_array().unwrap();
-    let entry = entries.iter().find(|e| e["action"] == "created" && e["entityType"] == "remote");
+    let entry = entries
+        .iter()
+        .find(|e| e["action"] == "created" && e["entityType"] == "remote");
     assert!(entry.is_some(), "expected a remote create entry");
     assert_eq!(entry.unwrap()["entityId"], "auditR");
 }
@@ -1553,7 +1592,9 @@ async fn audit_log_records_remote_delete() {
     let body = json_body(app.oneshot(auth_get("/api/system/audit")).await.unwrap()).await;
     let entries = body["entries"].as_array().unwrap();
     assert!(
-        entries.iter().any(|e| e["action"] == "deleted" && e["entityId"] == "auditDel"),
+        entries
+            .iter()
+            .any(|e| e["action"] == "deleted" && e["entityId"] == "auditDel"),
         "expected a delete audit entry"
     );
 }
@@ -1576,10 +1617,17 @@ async fn audit_log_filters_by_entity_type() {
 
     tokio::task::yield_now().await;
 
-    let body =
-        json_body(app.oneshot(auth_get("/api/system/audit?entity_type=host")).await.unwrap()).await;
+    let body = json_body(
+        app.oneshot(auth_get("/api/system/audit?entity_type=host"))
+            .await
+            .unwrap(),
+    )
+    .await;
     let entries = body["entries"].as_array().unwrap();
-    assert!(entries.iter().all(|e| e["entityType"] == "host"), "should only contain host entries");
+    assert!(
+        entries.iter().all(|e| e["entityType"] == "host"),
+        "should only contain host entries"
+    );
     assert!(
         entries.iter().any(|e| e["entityId"] == host_id),
         "expected host create entry"
@@ -1615,10 +1663,17 @@ async fn audit_log_records_bulk_toggle() {
 
     tokio::task::yield_now().await;
 
-    let body =
-        json_body(app.oneshot(auth_get("/api/system/audit?action=bulk_toggle")).await.unwrap()).await;
+    let body = json_body(
+        app.oneshot(auth_get("/api/system/audit?action=bulk_toggle"))
+            .await
+            .unwrap(),
+    )
+    .await;
     let entries = body["entries"].as_array().unwrap();
-    assert!(!entries.is_empty(), "expected at least one bulk_toggle audit entry");
+    assert!(
+        !entries.is_empty(),
+        "expected at least one bulk_toggle audit entry"
+    );
     assert!(entries.iter().all(|e| e["action"] == "bulk_toggle"));
 }
 

@@ -50,7 +50,10 @@ fn parse_page(q_page: Option<u32>, q_limit: Option<u32>) -> Option<ListPage> {
         (pg, lim) => {
             let limit = lim.unwrap_or(50).clamp(1, MAX_PAGE_SIZE) as u64;
             let page = pg.unwrap_or(1).max(1) as u64;
-            Some(ListPage { limit, offset: (page - 1) * limit })
+            Some(ListPage {
+                limit,
+                offset: (page - 1) * limit,
+            })
         }
     }
 }
@@ -60,7 +63,11 @@ fn pagination_fields(lp: &Option<ListPage>, total: u64) -> (Option<u32>, Option<
         None => (None, None, None),
         Some(p) => {
             let page_num = (p.offset / p.limit + 1) as u32;
-            let page_count = if p.limit > 0 { ((total + p.limit - 1) / p.limit) as u32 } else { 0 };
+            let page_count = if p.limit > 0 {
+                ((total + p.limit - 1) / p.limit) as u32
+            } else {
+                0
+            };
             (Some(page_num), Some(p.limit as u32), Some(page_count))
         }
     }
@@ -177,7 +184,14 @@ async fn create(
     match store::insert(&state.db, &remote).await {
         Ok(()) => {
             let trigger = format!("add:{}", remote.name);
-            audit::append(state.db.clone(), "remote", &remote.name, "created", cid.as_str(), None);
+            audit::append(
+                state.db.clone(),
+                "remote",
+                &remote.name,
+                "created",
+                cid.as_str(),
+                None,
+            );
             versions::record(&state.db, &remote).await;
             let res = (StatusCode::CREATED, Json(remote)).into_response();
             broadcast_remotes_changed(&state, trigger).await;
@@ -247,7 +261,14 @@ async fn update(
     match store::update(&state.db, &name, body).await {
         Ok(Some(remote)) => {
             let trigger = format!("update:{}", remote.name);
-            audit::append(state.db.clone(), "remote", &remote.name, "updated", cid.as_str(), None);
+            audit::append(
+                state.db.clone(),
+                "remote",
+                &remote.name,
+                "updated",
+                cid.as_str(),
+                None,
+            );
             versions::record(&state.db, &remote).await;
             let res = Json(remote).into_response();
             broadcast_remotes_changed(&state, trigger).await;
@@ -294,7 +315,14 @@ async fn toggle(
     match store::toggle(&state.db, &name).await {
         Ok(Some(remote)) => {
             let trigger = format!("toggle:{}", remote.name);
-            audit::append(state.db.clone(), "remote", &remote.name, "toggled", cid.as_str(), None);
+            audit::append(
+                state.db.clone(),
+                "remote",
+                &remote.name,
+                "toggled",
+                cid.as_str(),
+                None,
+            );
             let res = Json(remote).into_response();
             broadcast_remotes_changed(&state, trigger).await;
             res
@@ -323,7 +351,14 @@ async fn redeploy(
                 remote.name,
                 ts
             );
-            audit::append(state.db.clone(), "remote", &remote.name, "redeployed", cid.as_str(), None);
+            audit::append(
+                state.db.clone(),
+                "remote",
+                &remote.name,
+                "redeployed",
+                cid.as_str(),
+                None,
+            );
             (
                 StatusCode::ACCEPTED,
                 Json(json!({
@@ -352,7 +387,12 @@ async fn bulk_toggle(
     body: Option<Json<BulkToggleRequest>>,
 ) -> Response {
     let Some(Json(body)) = body else {
-        return error_response(StatusCode::BAD_REQUEST, "invalid_body", "JSON body required", cid.as_str());
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+            "JSON body required",
+            cid.as_str(),
+        );
     };
     if body.names.is_empty() {
         return error_response(
@@ -393,7 +433,12 @@ async fn bulk_delete(
     body: Option<Json<BulkDeleteRequest>>,
 ) -> Response {
     let Some(Json(body)) = body else {
-        return error_response(StatusCode::BAD_REQUEST, "invalid_body", "JSON body required", cid.as_str());
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+            "JSON body required",
+            cid.as_str(),
+        );
     };
     if body.names.is_empty() {
         return error_response(
@@ -434,12 +479,14 @@ async fn list_versions(
     Extension(cid): Extension<CorrelationId>,
 ) -> Response {
     match store::get(&state.db, &name).await {
-        Ok(None) => return error_response(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            format!("Remote \"{}\" not found", name),
-            cid.as_str(),
-        ),
+        Ok(None) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("Remote \"{}\" not found", name),
+                cid.as_str(),
+            )
+        }
         Err(e) => return server_error(e, cid.as_str()),
         Ok(Some(_)) => {}
     }
@@ -489,10 +536,7 @@ async fn rollback(
         Ok(None) => error_response(
             StatusCode::NOT_FOUND,
             "not_found",
-            format!(
-                "Remote \"{}\" or version {} not found",
-                name, body.version
-            ),
+            format!("Remote \"{}\" or version {} not found", name, body.version),
             cid.as_str(),
         ),
         Err(e) => server_error(e, cid.as_str()),

@@ -43,9 +43,10 @@ pub async fn record(db: &Db, remote: &RemoteConfig) {
     let id = Ulid::new().to_string();
     let recorded_at = iso_now();
 
-    let max: i64 = match sqlx::query_scalar(db.dialect.prep(
-        "SELECT COALESCE(MAX(version), 0) FROM remote_versions WHERE remote_name = ?",
-    ))
+    let max: i64 = match sqlx::query_scalar(
+        db.dialect
+            .prep("SELECT COALESCE(MAX(version), 0) FROM remote_versions WHERE remote_name = ?"),
+    )
     .bind(&remote.name)
     .fetch_one(db.pool())
     .await
@@ -97,7 +98,11 @@ pub async fn list_for_remote(db: &Db, remote_name: &str) -> Result<Vec<RemoteVer
         .map_err(StoreError::Db)
 }
 
-pub async fn get_version(db: &Db, remote_name: &str, version: u32) -> Result<Option<RemoteVersion>, StoreError> {
+pub async fn get_version(
+    db: &Db,
+    remote_name: &str,
+    version: u32,
+) -> Result<Option<RemoteVersion>, StoreError> {
     let sql = db.dialect.render(
         "SELECT id, remote_name, version, url, exposed_module, route_path, enabled, \
          upstream_url, visibility, recorded_at \

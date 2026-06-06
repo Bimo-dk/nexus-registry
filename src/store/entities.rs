@@ -24,9 +24,11 @@ fn row_to_host(r: &sqlx::any::AnyRow) -> Result<Host, sqlx::Error> {
     })
 }
 
-pub async fn list_hosts(db: &Db, page: Option<&ListPage>) -> Result<(Vec<HostWithGateCount>, u64), StoreError> {
-    const BASE: &str =
-        "SELECT h.id, h.name, h.url, h.framework, h.remote_entry, h.exposed_module, \
+pub async fn list_hosts(
+    db: &Db,
+    page: Option<&ListPage>,
+) -> Result<(Vec<HostWithGateCount>, u64), StoreError> {
+    const BASE: &str = "SELECT h.id, h.name, h.url, h.framework, h.remote_entry, h.exposed_module, \
          h.enabled, h.created_at, h.updated_at, COUNT(g.id) AS gate_count \
          FROM hosts h LEFT JOIN gates g ON g.host_id = h.id \
          GROUP BY h.id, h.name, h.url, h.framework, h.remote_entry, h.exposed_module, \

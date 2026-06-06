@@ -42,7 +42,10 @@ fn parse_page(q_page: Option<u32>, q_limit: Option<u32>) -> Option<ListPage> {
         (pg, lim) => {
             let limit = lim.unwrap_or(50).clamp(1, MAX_PAGE_SIZE) as u64;
             let page = pg.unwrap_or(1).max(1) as u64;
-            Some(ListPage { limit, offset: (page - 1) * limit })
+            Some(ListPage {
+                limit,
+                offset: (page - 1) * limit,
+            })
         }
     }
 }
@@ -59,12 +62,22 @@ async fn list(
                 None => (None, None, None),
                 Some(p) => {
                     let page_num = (p.offset / p.limit + 1) as u32;
-                    let pc = if p.limit > 0 { ((total + p.limit - 1) / p.limit) as u32 } else { 0 };
+                    let pc = if p.limit > 0 {
+                        ((total + p.limit - 1) / p.limit) as u32
+                    } else {
+                        0
+                    };
                     (Some(page_num), Some(p.limit as u32), Some(pc))
                 }
             };
-            Json(GatesListResponse { gates, total: total as usize, page, page_size, page_count })
-                .into_response()
+            Json(GatesListResponse {
+                gates,
+                total: total as usize,
+                page,
+                page_size,
+                page_count,
+            })
+            .into_response()
         }
         Err(e) => server_error(e, &cid),
     }
@@ -288,7 +301,12 @@ async fn bulk_toggle(
     body: Option<Json<BulkIdsToggleRequest>>,
 ) -> Response {
     let Some(Json(body)) = body else {
-        return error_response(StatusCode::BAD_REQUEST, "invalid_body", "JSON body required", cid.as_str());
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+            "JSON body required",
+            cid.as_str(),
+        );
     };
     if body.ids.is_empty() {
         return error_response(
