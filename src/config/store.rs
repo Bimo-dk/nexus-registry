@@ -214,8 +214,7 @@ impl ConfigStore {
 // builds the right tail clause so each save_* function only writes the column
 // list once and lets the dialect pick the upsert syntax.
 fn upsert(dialect: Dialect, table: &str, columns: &[&str]) -> String {
-    let placeholders = std::iter::repeat("?")
-        .take(columns.len())
+    let placeholders = std::iter::repeat_n("?", columns.len())
         .collect::<Vec<_>>()
         .join(", ");
     let col_list = columns.join(", ");
