@@ -63,11 +63,7 @@ fn pagination_fields(lp: &Option<ListPage>, total: u64) -> (Option<u32>, Option<
         None => (None, None, None),
         Some(p) => {
             let page_num = (p.offset / p.limit + 1) as u32;
-            let page_count = if p.limit > 0 {
-                ((total + p.limit - 1) / p.limit) as u32
-            } else {
-                0
-            };
+            let page_count = total.div_ceil(p.limit) as u32;
             (Some(page_num), Some(p.limit as u32), Some(page_count))
         }
     }

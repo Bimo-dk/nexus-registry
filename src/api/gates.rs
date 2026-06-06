@@ -62,11 +62,7 @@ async fn list(
                 None => (None, None, None),
                 Some(p) => {
                     let page_num = (p.offset / p.limit + 1) as u32;
-                    let pc = if p.limit > 0 {
-                        ((total + p.limit - 1) / p.limit) as u32
-                    } else {
-                        0
-                    };
+                    let pc = total.div_ceil(p.limit) as u32;
                     (Some(page_num), Some(p.limit as u32), Some(pc))
                 }
             };
