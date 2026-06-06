@@ -1,33 +1,41 @@
 # syntax=docker/dockerfile:1.7
-# Lokal testversion — installerer @bimo-dk/* fra lokal Verdaccio paa host:4873.
-# Kræver at start.ps1 i nexus-test/ er koert foerst.
+# Lokal test-version — identisk med Dockerfile, men holdt separat fordi
+# nexus-test/docker-compose.yml peger på Dockerfile.local pr. konvention.
 
-FROM node:22-alpine AS builder
+FROM rust:1-alpine AS builder
+RUN apk add --no-cache musl-dev gcc
+
 WORKDIR /app
 
-COPY package*.json tsconfig.json ./
-RUN printf '@bimo-dk:registry=http://host.docker.internal:4873\nlegacy-peer-deps=true\n' > .npmrc
-RUN rm -f package-lock.json && npm install --no-audit --no-fund --legacy-peer-deps
-
+COPY Cargo.toml ./
 COPY src ./src
-RUN npm run build
 
-FROM node:22-alpine
-RUN apk add --no-cache wget
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release && \
+    cp /app/target/release/nexus-registry /usr/local/bin/nexus-registry
+
+FROM alpine:3
+RUN apk add --no-cache wget ca-certificates
+
+# See nexus-registry/Dockerfile for full env-var documentation.
+ENV BIND_ADDRESS=0.0.0.0
+ENV PORT=8670
+ENV NEXUS_TOKEN=
+ENV ALLOWED_ORIGINS=
+ENV DATA_DIR=/app/data
+ENV DATABASE_URL=
+ENV HEALTH_CHECK_INTERVAL_MS=30000
+ENV SYSTEM_SERVICES=gateway=http://gateway/health,host=http://host/health
+ENV LOG_BUFFER_CAPACITY=500
 ENV NODE_ENV=production
-ENV PORT=3000
+
 WORKDIR /app
 
-COPY package*.json ./
-RUN printf '@bimo-dk:registry=http://host.docker.internal:4873\nlegacy-peer-deps=true\n' > .npmrc
-RUN npm install --omit=dev --no-audit --no-fund --legacy-peer-deps && \
-    rm -f .npmrc && \
-    npm cache clean --force
-
-COPY --from=builder /app/dist ./dist
+COPY --from=builder /usr/local/bin/nexus-registry /usr/local/bin/nexus-registry
 COPY src/data ./data
 
-EXPOSE 3000
+EXPOSE 8670
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-  CMD wget -qO- http://localhost:3000/health || exit 1
-CMD ["node", "dist/index.js"]
+  CMD wget -qO- "http://localhost:${PORT}/health" || exit 1
+CMD ["nexus-registry"]
