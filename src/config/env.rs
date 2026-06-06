@@ -19,7 +19,16 @@ pub struct EnvConfig {
     pub health_interval_ms: u64,
     pub log_buffer_capacity: usize,
     pub data_dir: PathBuf,
+    // Database — either DATABASE_URL OR the DB_* split vars. See
+    // `config::database::DatabaseConfig::resolve` for the precedence rules.
     pub database_url: String,
+    pub db_driver: String,
+    pub db_host: String,
+    pub db_port: u16,
+    pub db_user: String,
+    pub db_password: String,
+    pub db_name: String,
+    pub db_ssl: String,
 }
 
 impl EnvConfig {
@@ -54,10 +63,16 @@ impl EnvConfig {
         let data_dir = env::var("DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("data"));
-        let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
-            let db_file = data_dir.join("registry.db");
-            format!("sqlite://{}", db_file.display())
-        });
+        // DATABASE_URL stays empty by default — the database module resolves
+        // it (or assembles one from DB_* split vars) when init runs.
+        let database_url = env::var("DATABASE_URL").unwrap_or_default();
+        let db_driver = env::var("DB_DRIVER").unwrap_or_default();
+        let db_host = env::var("DB_HOST").unwrap_or_default();
+        let db_port = env::var("DB_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let db_user = env::var("DB_USER").unwrap_or_default();
+        let db_password = env::var("DB_PASSWORD").unwrap_or_default();
+        let db_name = env::var("DB_NAME").unwrap_or_default();
+        let db_ssl = env::var("DB_SSL").unwrap_or_default();
 
         Self {
             bind_address,
@@ -71,6 +86,13 @@ impl EnvConfig {
             log_buffer_capacity,
             data_dir,
             database_url,
+            db_driver,
+            db_host,
+            db_port,
+            db_user,
+            db_password,
+            db_name,
+            db_ssl,
         }
     }
 }
