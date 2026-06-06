@@ -37,7 +37,7 @@ use tracing::{info, warn, Level, Span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::config::store::ConfigStore;
-use crate::config::EnvConfig;
+use crate::config::{DatabaseConfig, EnvConfig};
 use crate::correlation::CorrelationId;
 use crate::features::circuit::CircuitBreakerRegistry;
 use crate::features::rate_limit::RateLimitState;
@@ -61,12 +61,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         warn!("[auth] NEXUS_TOKEN_PEPPER is not set — using the default pepper, set this in production");
     }
 
-    let db = store::init(&env.database_url, &env.data_dir).await?;
+    let db_cfg = DatabaseConfig::resolve(&env, &env.data_dir)
+        .map_err(|e| format!("[registry] database configuration error: {e}"))?;
+    info!(
+        "[registry] Connecting to {} database",
+        db_cfg.dialect.as_str()
+    );
+    let db = store::init(&db_cfg, &env.data_dir).await?;
     let initial = store::list(&db).await?;
     info!(
-        "[registry] Loaded {} remote(s) from {}",
+        "[registry] Loaded {} remote(s) from {} ({})",
         initial.len(),
-        env.database_url
+        db_cfg.dialect.as_str(),
+        sanitise_db_url(&db_cfg.url)
     );
 
     let config_store = ConfigStore::hydrate(db.clone()).await?;
@@ -246,8 +253,21 @@ fn build_cors(env: &EnvConfig) -> CorsLayer {
         .expose_headers(exposed)
 }
 
+/// Strip credentials from a connection URL before it goes anywhere user-visible
+/// (logs, /api/system/config, errors). Returns the URL unchanged for SQLite
+/// (no embedded credentials).
+fn sanitise_db_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let Some((_credentials, host_part)) = rest.split_once('@') else {
+        return url.to_string();
+    };
+    format!("{scheme}://***@{host_part}")
+}
+
 async fn public_health(State(state): State<AppState>) -> Response {
-    let db_ok = sqlx::query("SELECT 1").execute(&state.db).await.is_ok();
+    let db_ok = sqlx::query("SELECT 1").execute(state.db.pool()).await.is_ok();
     let status = if db_ok { "ok" } else { "degraded" };
     let code = if db_ok {
         StatusCode::OK

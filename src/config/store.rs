@@ -4,22 +4,29 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use sqlx::Row;
 
+use crate::config::database::Dialect;
 use crate::config::types::{
     AllConfig, CircuitBreakerConfig, GatewayProtectionConfig, GracefulShutdownConfig, MetricsConfig,
     RateLimitingConfig, TokenRotationStored, WsReconnectConfig,
 };
 use crate::store::Db;
 
+// Cross-dialect schema. Each statement uses syntax accepted by SQLite,
+// Postgres and MySQL alike. INTEGER PRIMARY KEY works everywhere. VARCHAR
+// rather than TEXT for PK / short-string columns so MySQL can index them
+// without `key length` errors. Single-row config tables intentionally do not
+// declare a CHECK constraint here — MySQL 5.x silently ignored CHECK anyway,
+// and we control every INSERT to use id = 1.
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS rate_limiting_config (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
+    id INTEGER PRIMARY KEY,
     enabled INTEGER NOT NULL,
     requests_per_second INTEGER NOT NULL,
     burst_size INTEGER NOT NULL,
-    by_field TEXT NOT NULL
+    by_field VARCHAR(32) NOT NULL
 );
 CREATE TABLE IF NOT EXISTS ws_reconnect_config (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
+    id INTEGER PRIMARY KEY,
     initial_delay_ms INTEGER NOT NULL,
     max_delay_ms INTEGER NOT NULL,
     backoff_multiplier REAL NOT NULL,
@@ -27,7 +34,7 @@ CREATE TABLE IF NOT EXISTS ws_reconnect_config (
     max_attempts INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS circuit_breaker_config (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
+    id INTEGER PRIMARY KEY,
     enabled INTEGER NOT NULL,
     failure_threshold INTEGER NOT NULL,
     success_threshold INTEGER NOT NULL,
@@ -35,25 +42,25 @@ CREATE TABLE IF NOT EXISTS circuit_breaker_config (
     half_open_max_calls INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS graceful_shutdown_config (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
+    id INTEGER PRIMARY KEY,
     timeout_ms INTEGER NOT NULL,
     ws_notice_ms INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS metrics_config (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
+    id INTEGER PRIMARY KEY,
     prometheus_enabled INTEGER NOT NULL,
-    prometheus_path TEXT NOT NULL,
+    prometheus_path VARCHAR(255) NOT NULL,
     require_auth INTEGER NOT NULL,
     custom_labels TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS token_rotation (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    active_token_hash TEXT NOT NULL,
-    previous_token_hash TEXT,
-    previous_token_expires_at TEXT
+    id INTEGER PRIMARY KEY,
+    active_token_hash VARCHAR(255) NOT NULL,
+    previous_token_hash VARCHAR(255),
+    previous_token_expires_at VARCHAR(64)
 );
 CREATE TABLE IF NOT EXISTS gateway_protection_config (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
+    id INTEGER PRIMARY KEY,
     config_json TEXT NOT NULL
 );
 "#;
@@ -71,9 +78,8 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub async fn hydrate(db: Db) -> Result<Arc<Self>, sqlx::Error> {
-        // Run multi-statement schema by splitting on `;` — sqlx execute does one stmt per call.
         for stmt in SCHEMA.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-            sqlx::query(stmt).execute(&db).await?;
+            sqlx::query(stmt).execute(db.pool()).await?;
         }
 
         let rate_limiting = load_rate_limiting(&db).await?;
@@ -201,14 +207,42 @@ impl ConfigStore {
     }
 }
 
+// ---- Upsert helper ----
+//
+// SQLite and Postgres share `INSERT ... ON CONFLICT(id) DO UPDATE SET col = excluded.col`.
+// MySQL uses `INSERT ... ON DUPLICATE KEY UPDATE col = VALUES(col)`. This helper
+// builds the right tail clause so each save_* function only writes the column
+// list once and lets the dialect pick the upsert syntax.
+fn upsert(dialect: Dialect, table: &str, columns: &[&str]) -> String {
+    let placeholders = std::iter::repeat("?").take(columns.len()).collect::<Vec<_>>().join(", ");
+    let col_list = columns.join(", ");
+    let updatable: Vec<&&str> = columns.iter().filter(|c| **c != "id").collect();
+    let tail = match dialect {
+        Dialect::Sqlite | Dialect::Postgres => {
+            let assigns: Vec<String> = updatable
+                .iter()
+                .map(|c| format!("{c} = excluded.{c}"))
+                .collect();
+            format!("ON CONFLICT(id) DO UPDATE SET {}", assigns.join(", "))
+        }
+        Dialect::MySql => {
+            let assigns: Vec<String> = updatable
+                .iter()
+                .map(|c| format!("{c} = VALUES({c})"))
+                .collect();
+            format!("ON DUPLICATE KEY UPDATE {}", assigns.join(", "))
+        }
+    };
+    format!("INSERT INTO {table} ({col_list}) VALUES ({placeholders}) {tail}")
+}
+
 // ---- Section loaders / savers ----
 
 async fn load_rate_limiting(db: &Db) -> Result<RateLimitingConfig, sqlx::Error> {
-    let row = sqlx::query(
+    let sql = db.dialect.render(
         "SELECT enabled, requests_per_second, burst_size, by_field FROM rate_limiting_config WHERE id = 1",
-    )
-    .fetch_optional(db)
-    .await?;
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_optional(db.pool()).await?;
     let cfg = match row {
         Some(r) => RateLimitingConfig {
             enabled: r.try_get::<i64, _>("enabled")? != 0,
@@ -226,31 +260,29 @@ async fn load_rate_limiting(db: &Db) -> Result<RateLimitingConfig, sqlx::Error> 
 }
 
 async fn save_rate_limiting(db: &Db, cfg: &RateLimitingConfig) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO rate_limiting_config (id, enabled, requests_per_second, burst_size, by_field)
-         VALUES (1, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-            enabled = excluded.enabled,
-            requests_per_second = excluded.requests_per_second,
-            burst_size = excluded.burst_size,
-            by_field = excluded.by_field",
-    )
-    .bind(cfg.enabled as i64)
-    .bind(cfg.requests_per_second as i64)
-    .bind(cfg.burst_size as i64)
-    .bind(&cfg.by)
-    .execute(db)
-    .await?;
+    let raw = upsert(
+        db.dialect,
+        "rate_limiting_config",
+        &["id", "enabled", "requests_per_second", "burst_size", "by_field"],
+    );
+    let sql = db.dialect.render(&raw);
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .bind(1_i64)
+        .bind(cfg.enabled as i64)
+        .bind(cfg.requests_per_second as i64)
+        .bind(cfg.burst_size as i64)
+        .bind(&cfg.by)
+        .execute(db.pool())
+        .await?;
     Ok(())
 }
 
 async fn load_ws_reconnect(db: &Db) -> Result<WsReconnectConfig, sqlx::Error> {
-    let row = sqlx::query(
+    let sql = db.dialect.render(
         "SELECT initial_delay_ms, max_delay_ms, backoff_multiplier, jitter_ms, max_attempts \
          FROM ws_reconnect_config WHERE id = 1",
-    )
-    .fetch_optional(db)
-    .await?;
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_optional(db.pool()).await?;
     let cfg = match row {
         Some(r) => WsReconnectConfig {
             initial_delay_ms: r.try_get::<i64, _>("initial_delay_ms")? as u64,
@@ -269,33 +301,37 @@ async fn load_ws_reconnect(db: &Db) -> Result<WsReconnectConfig, sqlx::Error> {
 }
 
 async fn save_ws_reconnect(db: &Db, cfg: &WsReconnectConfig) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO ws_reconnect_config (id, initial_delay_ms, max_delay_ms, backoff_multiplier, jitter_ms, max_attempts)
-         VALUES (1, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-            initial_delay_ms = excluded.initial_delay_ms,
-            max_delay_ms = excluded.max_delay_ms,
-            backoff_multiplier = excluded.backoff_multiplier,
-            jitter_ms = excluded.jitter_ms,
-            max_attempts = excluded.max_attempts",
-    )
-    .bind(cfg.initial_delay_ms as i64)
-    .bind(cfg.max_delay_ms as i64)
-    .bind(cfg.backoff_multiplier)
-    .bind(cfg.jitter_ms as i64)
-    .bind(cfg.max_attempts as i64)
-    .execute(db)
-    .await?;
+    let raw = upsert(
+        db.dialect,
+        "ws_reconnect_config",
+        &[
+            "id",
+            "initial_delay_ms",
+            "max_delay_ms",
+            "backoff_multiplier",
+            "jitter_ms",
+            "max_attempts",
+        ],
+    );
+    let sql = db.dialect.render(&raw);
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .bind(1_i64)
+        .bind(cfg.initial_delay_ms as i64)
+        .bind(cfg.max_delay_ms as i64)
+        .bind(cfg.backoff_multiplier)
+        .bind(cfg.jitter_ms as i64)
+        .bind(cfg.max_attempts as i64)
+        .execute(db.pool())
+        .await?;
     Ok(())
 }
 
 async fn load_circuit_breaker(db: &Db) -> Result<CircuitBreakerConfig, sqlx::Error> {
-    let row = sqlx::query(
+    let sql = db.dialect.render(
         "SELECT enabled, failure_threshold, success_threshold, open_duration_ms, half_open_max_calls \
          FROM circuit_breaker_config WHERE id = 1",
-    )
-    .fetch_optional(db)
-    .await?;
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_optional(db.pool()).await?;
     let cfg = match row {
         Some(r) => CircuitBreakerConfig {
             enabled: r.try_get::<i64, _>("enabled")? != 0,
@@ -314,30 +350,36 @@ async fn load_circuit_breaker(db: &Db) -> Result<CircuitBreakerConfig, sqlx::Err
 }
 
 async fn save_circuit_breaker(db: &Db, cfg: &CircuitBreakerConfig) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO circuit_breaker_config (id, enabled, failure_threshold, success_threshold, open_duration_ms, half_open_max_calls)
-         VALUES (1, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-            enabled = excluded.enabled,
-            failure_threshold = excluded.failure_threshold,
-            success_threshold = excluded.success_threshold,
-            open_duration_ms = excluded.open_duration_ms,
-            half_open_max_calls = excluded.half_open_max_calls",
-    )
-    .bind(cfg.enabled as i64)
-    .bind(cfg.failure_threshold as i64)
-    .bind(cfg.success_threshold as i64)
-    .bind(cfg.open_duration_ms as i64)
-    .bind(cfg.half_open_max_calls as i64)
-    .execute(db)
-    .await?;
+    let raw = upsert(
+        db.dialect,
+        "circuit_breaker_config",
+        &[
+            "id",
+            "enabled",
+            "failure_threshold",
+            "success_threshold",
+            "open_duration_ms",
+            "half_open_max_calls",
+        ],
+    );
+    let sql = db.dialect.render(&raw);
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .bind(1_i64)
+        .bind(cfg.enabled as i64)
+        .bind(cfg.failure_threshold as i64)
+        .bind(cfg.success_threshold as i64)
+        .bind(cfg.open_duration_ms as i64)
+        .bind(cfg.half_open_max_calls as i64)
+        .execute(db.pool())
+        .await?;
     Ok(())
 }
 
 async fn load_graceful_shutdown(db: &Db) -> Result<GracefulShutdownConfig, sqlx::Error> {
-    let row = sqlx::query("SELECT timeout_ms, ws_notice_ms FROM graceful_shutdown_config WHERE id = 1")
-        .fetch_optional(db)
-        .await?;
+    let sql = db
+        .dialect
+        .render("SELECT timeout_ms, ws_notice_ms FROM graceful_shutdown_config WHERE id = 1");
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_optional(db.pool()).await?;
     let cfg = match row {
         Some(r) => GracefulShutdownConfig {
             timeout_ms: r.try_get::<i64, _>("timeout_ms")? as u64,
@@ -353,27 +395,27 @@ async fn load_graceful_shutdown(db: &Db) -> Result<GracefulShutdownConfig, sqlx:
 }
 
 async fn save_graceful_shutdown(db: &Db, cfg: &GracefulShutdownConfig) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO graceful_shutdown_config (id, timeout_ms, ws_notice_ms)
-         VALUES (1, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-            timeout_ms = excluded.timeout_ms,
-            ws_notice_ms = excluded.ws_notice_ms",
-    )
-    .bind(cfg.timeout_ms as i64)
-    .bind(cfg.ws_notice_ms as i64)
-    .execute(db)
-    .await?;
+    let raw = upsert(
+        db.dialect,
+        "graceful_shutdown_config",
+        &["id", "timeout_ms", "ws_notice_ms"],
+    );
+    let sql = db.dialect.render(&raw);
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .bind(1_i64)
+        .bind(cfg.timeout_ms as i64)
+        .bind(cfg.ws_notice_ms as i64)
+        .execute(db.pool())
+        .await?;
     Ok(())
 }
 
 async fn load_metrics(db: &Db) -> Result<MetricsConfig, sqlx::Error> {
-    let row = sqlx::query(
+    let sql = db.dialect.render(
         "SELECT prometheus_enabled, prometheus_path, require_auth, custom_labels \
          FROM metrics_config WHERE id = 1",
-    )
-    .fetch_optional(db)
-    .await?;
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_optional(db.pool()).await?;
     let cfg = match row {
         Some(r) => {
             let labels_json: String = r.try_get("custom_labels")?;
@@ -397,31 +439,35 @@ async fn load_metrics(db: &Db) -> Result<MetricsConfig, sqlx::Error> {
 
 async fn save_metrics(db: &Db, cfg: &MetricsConfig) -> Result<(), sqlx::Error> {
     let labels_json = serde_json::to_string(&cfg.custom_labels).unwrap_or_else(|_| "{}".into());
-    sqlx::query(
-        "INSERT INTO metrics_config (id, prometheus_enabled, prometheus_path, require_auth, custom_labels)
-         VALUES (1, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-            prometheus_enabled = excluded.prometheus_enabled,
-            prometheus_path = excluded.prometheus_path,
-            require_auth = excluded.require_auth,
-            custom_labels = excluded.custom_labels",
-    )
-    .bind(cfg.prometheus_enabled as i64)
-    .bind(&cfg.prometheus_path)
-    .bind(cfg.require_auth as i64)
-    .bind(labels_json)
-    .execute(db)
-    .await?;
+    let raw = upsert(
+        db.dialect,
+        "metrics_config",
+        &[
+            "id",
+            "prometheus_enabled",
+            "prometheus_path",
+            "require_auth",
+            "custom_labels",
+        ],
+    );
+    let sql = db.dialect.render(&raw);
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .bind(1_i64)
+        .bind(cfg.prometheus_enabled as i64)
+        .bind(&cfg.prometheus_path)
+        .bind(cfg.require_auth as i64)
+        .bind(labels_json)
+        .execute(db.pool())
+        .await?;
     Ok(())
 }
 
 async fn load_token(db: &Db) -> Result<Option<TokenRotationStored>, sqlx::Error> {
-    let row = sqlx::query(
+    let sql = db.dialect.render(
         "SELECT active_token_hash, previous_token_hash, previous_token_expires_at \
          FROM token_rotation WHERE id = 1",
-    )
-    .fetch_optional(db)
-    .await?;
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_optional(db.pool()).await?;
     Ok(row.map(|r| TokenRotationStored {
         active_token_hash: r.get("active_token_hash"),
         previous_token_hash: r.get("previous_token_hash"),
@@ -430,26 +476,32 @@ async fn load_token(db: &Db) -> Result<Option<TokenRotationStored>, sqlx::Error>
 }
 
 async fn save_token(db: &Db, t: &TokenRotationStored) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO token_rotation (id, active_token_hash, previous_token_hash, previous_token_expires_at)
-         VALUES (1, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-            active_token_hash = excluded.active_token_hash,
-            previous_token_hash = excluded.previous_token_hash,
-            previous_token_expires_at = excluded.previous_token_expires_at",
-    )
-    .bind(&t.active_token_hash)
-    .bind(t.previous_token_hash.as_deref())
-    .bind(t.previous_token_expires_at.as_deref())
-    .execute(db)
-    .await?;
+    let raw = upsert(
+        db.dialect,
+        "token_rotation",
+        &[
+            "id",
+            "active_token_hash",
+            "previous_token_hash",
+            "previous_token_expires_at",
+        ],
+    );
+    let sql = db.dialect.render(&raw);
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .bind(1_i64)
+        .bind(&t.active_token_hash)
+        .bind(t.previous_token_hash.as_deref())
+        .bind(t.previous_token_expires_at.as_deref())
+        .execute(db.pool())
+        .await?;
     Ok(())
 }
 
 async fn load_gateway_protection(db: &Db) -> Result<GatewayProtectionConfig, sqlx::Error> {
-    let row = sqlx::query("SELECT config_json FROM gateway_protection_config WHERE id = 1")
-        .fetch_optional(db)
-        .await?;
+    let sql = db
+        .dialect
+        .render("SELECT config_json FROM gateway_protection_config WHERE id = 1");
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_optional(db.pool()).await?;
     let cfg = match row {
         Some(r) => {
             let json: String = r.try_get("config_json")?;
@@ -466,12 +518,16 @@ async fn load_gateway_protection(db: &Db) -> Result<GatewayProtectionConfig, sql
 
 async fn save_gateway_protection(db: &Db, cfg: &GatewayProtectionConfig) -> Result<(), sqlx::Error> {
     let json = serde_json::to_string(cfg).unwrap_or_else(|_| "{}".into());
-    sqlx::query(
-        "INSERT INTO gateway_protection_config (id, config_json) VALUES (1, ?)
-         ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json",
-    )
-    .bind(json)
-    .execute(db)
-    .await?;
+    let raw = upsert(
+        db.dialect,
+        "gateway_protection_config",
+        &["id", "config_json"],
+    );
+    let sql = db.dialect.render(&raw);
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .bind(1_i64)
+        .bind(json)
+        .execute(db.pool())
+        .await?;
     Ok(())
 }

@@ -43,11 +43,45 @@ ENV NEXUS_TOKEN_PEPPER=
 # CORS — comma-separated list of allowed origins, or "*" / empty for any
 ENV ALLOWED_ORIGINS=
 
-# Persistence
-#   DATABASE_URL takes precedence. If unset, registry uses sqlite at
-#   "${DATA_DIR}/registry.db". Mount /app/data as a volume to persist.
+# Persistence — pick a database
+#   The registry supports SQLite, Postgres, MySQL and MariaDB. There are two
+#   equivalent ways to point it at one:
+#
+#   (A) DATABASE_URL    — single URL, sqlx scheme-dispatched.
+#       sqlite:///app/data/registry.db
+#       postgres://nexus:secret@db:5432/nexus_registry
+#       mysql://nexus:secret@db:3306/nexus_registry         (MySQL or MariaDB)
+#       mariadb://nexus:secret@db:3306/nexus_registry       (alias)
+#
+#   (B) DB_*  — split vars assembled internally. Friendlier for docker
+#       compose / Kubernetes when the password contains characters that would
+#       need URL-encoding.
+#
+#   DATABASE_URL wins if both are set. When neither is set the registry falls
+#   back to SQLite at ${DATA_DIR}/registry.db.
+#
+#   DATA_DIR is only used by the SQLite default and the legacy registry.json
+#   import path. Mount it as a volume to persist SQLite state across restarts.
 ENV DATA_DIR=/app/data
 ENV DATABASE_URL=
+
+# DB_DRIVER  - one of: sqlite, postgres, mysql, mariadb
+# DB_HOST    - required for postgres / mysql / mariadb
+# DB_PORT    - default 5432 (postgres) or 3306 (mysql/mariadb); 0 = use default
+# DB_USER    - required for postgres / mysql / mariadb
+# DB_PASSWORD- URL-encoded internally; you do not need to escape it
+# DB_NAME    - required for postgres / mysql / mariadb. For SQLite it is the
+#              file path; defaults to ${DATA_DIR}/registry.db when unset.
+# DB_SSL     - postgres: disable | prefer | require
+#              mysql/mariadb: disabled | preferred | required
+#              (the short aliases disable/prefer/require also work for mysql)
+ENV DB_DRIVER=
+ENV DB_HOST=
+ENV DB_PORT=
+ENV DB_USER=
+ENV DB_PASSWORD=
+ENV DB_NAME=
+ENV DB_SSL=
 
 # Health-check loop
 #   SYSTEM_SERVICES is a comma-separated list of "name=health_url" pairs

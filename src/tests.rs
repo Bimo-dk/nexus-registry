@@ -10,75 +10,36 @@ use axum::{
 };
 use parking_lot::RwLock;
 use serde_json::{json, Value};
-use sqlx::sqlite::SqlitePoolOptions;
 use tokio::sync::broadcast;
 use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 
 use crate::config::env::EnvConfig;
 use crate::config::store::ConfigStore;
+use crate::config::{DatabaseConfig, Dialect};
 use crate::features::circuit::CircuitBreakerRegistry;
 use crate::features::rate_limit::RateLimitState;
 use crate::features::shutdown::ShutdownController;
 use crate::observability::log_buffer::LogBuffer;
 use crate::observability::metrics::Metrics;
 use crate::state::AppState;
+use crate::store;
 use crate::ws::messages::ServerMessage;
 
 const TOKEN: &str = "test-token";
 const PEPPER: &str = "test-pepper";
 
 async fn build_test_state() -> AppState {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(2)
-        .connect("sqlite::memory:")
-        .await
-        .expect("in-memory sqlite");
+    // Each test gets a fresh in-memory SQLite database via the production
+    // init path, so the test schema can never drift from real boot.
+    let tmp = std::env::temp_dir().join(format!("nexus-registry-test-{}", ulid::Ulid::new()));
+    let db_cfg = DatabaseConfig {
+        url: "sqlite::memory:".to_string(),
+        dialect: Dialect::Sqlite,
+    };
+    let db = store::init(&db_cfg, &tmp).await.expect("store::init");
 
-    // Mirror the schema normally applied by store::init (idempotent).
-    sqlx::query("PRAGMA foreign_keys = ON")
-        .execute(&pool)
-        .await
-        .unwrap();
-    let schema = [
-        "CREATE TABLE IF NOT EXISTS remotes (
-            name TEXT PRIMARY KEY,
-            url TEXT NOT NULL,
-            exposed_module TEXT NOT NULL,
-            route_path TEXT NOT NULL,
-            enabled INTEGER NOT NULL,
-            added_at TEXT NOT NULL,
-            upstream_url TEXT,
-            health_status TEXT,
-            last_health_check TEXT,
-            visibility TEXT NOT NULL DEFAULT 'global'
-        )",
-        "CREATE TABLE IF NOT EXISTS hosts (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL UNIQUE,
-            url TEXT NOT NULL,
-            framework TEXT NOT NULL,
-            remote_entry TEXT NOT NULL,
-            exposed_module TEXT NOT NULL,
-            enabled INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )",
-        "CREATE TABLE IF NOT EXISTS gates (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL UNIQUE,
-            domain TEXT NOT NULL UNIQUE,
-            host_id TEXT NOT NULL REFERENCES hosts(id) ON DELETE RESTRICT,
-            enabled INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )",
-    ];
-    for stmt in schema {
-        sqlx::query(stmt).execute(&pool).await.unwrap();
-    }
-
-    let config_store = ConfigStore::hydrate(pool.clone()).await.expect("hydrate");
+    let config_store = ConfigStore::hydrate(db.clone()).await.expect("hydrate");
     crate::features::token::init_from_env(&config_store, TOKEN, PEPPER)
         .await
         .unwrap();
@@ -96,6 +57,13 @@ async fn build_test_state() -> AppState {
         log_buffer_capacity: 100,
         data_dir: std::path::PathBuf::from("."),
         database_url: "sqlite::memory:".to_string(),
+        db_driver: String::new(),
+        db_host: String::new(),
+        db_port: 0,
+        db_user: String::new(),
+        db_password: String::new(),
+        db_name: String::new(),
+        db_ssl: String::new(),
     };
 
     let circuit_breaker = CircuitBreakerRegistry::new(config_store.clone());
@@ -104,7 +72,7 @@ async fn build_test_state() -> AppState {
     let (broadcast_tx, _) = broadcast::channel(64);
 
     AppState {
-        db: pool,
+        db,
         env: Arc::new(env),
         config_store,
         circuit_breaker,
@@ -869,6 +837,217 @@ async fn host_update_broadcasts_host_changed() {
         }
         other => panic!("expected HostChanged, got {:?}", other),
     }
+}
+
+// ---------- Multi-DB integration tests ----------
+//
+// These exercise the new sqlx::Any code paths against a real Postgres or
+// MySQL/MariaDB server. They look for TEST_POSTGRES_URL / TEST_MYSQL_URL in
+// the environment and skip when unset, so a plain `cargo test` from a fresh
+// clone still passes against SQLite only.
+//
+// Bring the databases online before running:
+//   docker run -d --name nx-test-pg    -e POSTGRES_PASSWORD=test -e POSTGRES_DB=nexus -p 5433:5432 postgres:16
+//   docker run -d --name nx-test-mysql -e MYSQL_ROOT_PASSWORD=test -e MYSQL_DATABASE=nexus -p 3307:3306 mysql:8
+// Then:
+//   TEST_POSTGRES_URL=postgres://postgres:test@localhost:5433/nexus \
+//   TEST_MYSQL_URL=mysql://root:test@localhost:3307/nexus \
+//     cargo test
+
+async fn build_state_for(cfg: DatabaseConfig) -> AppState {
+    let tmp = std::env::temp_dir().join(format!("nexus-registry-test-{}", ulid::Ulid::new()));
+    let db = store::init(&cfg, &tmp).await.expect("store::init");
+
+    // Reset every config table so token tests etc. start from defaults — each
+    // dialect run reuses the same database between tests.
+    for stmt in &[
+        "DELETE FROM rate_limiting_config",
+        "DELETE FROM ws_reconnect_config",
+        "DELETE FROM circuit_breaker_config",
+        "DELETE FROM graceful_shutdown_config",
+        "DELETE FROM metrics_config",
+        "DELETE FROM gateway_protection_config",
+        "DELETE FROM token_rotation",
+        "DELETE FROM gates",
+        "DELETE FROM hosts",
+        "DELETE FROM remotes",
+    ] {
+        let _ = sqlx::query(*stmt).execute(db.pool()).await;
+    }
+
+    let config_store = ConfigStore::hydrate(db.clone()).await.expect("hydrate");
+    crate::features::token::init_from_env(&config_store, TOKEN, PEPPER)
+        .await
+        .unwrap();
+
+    let env = EnvConfig {
+        bind_address: "127.0.0.1".to_string(),
+        port: 0,
+        node_env: "test".to_string(),
+        nexus_token: TOKEN.to_string(),
+        nexus_token_pepper: PEPPER.to_string(),
+        allowed_origins: vec![],
+        system_services: vec![],
+        health_interval_ms: 30_000,
+        log_buffer_capacity: 100,
+        data_dir: std::path::PathBuf::from("."),
+        database_url: String::new(),
+        db_driver: String::new(),
+        db_host: String::new(),
+        db_port: 0,
+        db_user: String::new(),
+        db_password: String::new(),
+        db_name: String::new(),
+        db_ssl: String::new(),
+    };
+
+    let circuit_breaker = CircuitBreakerRegistry::new(config_store.clone());
+    let rate_limit = RateLimitState::new(&config_store.rate_limiting());
+    let shutdown = ShutdownController::new();
+    let (broadcast_tx, _) = broadcast::channel(64);
+
+    AppState {
+        db,
+        env: Arc::new(env),
+        config_store,
+        circuit_breaker,
+        rate_limit,
+        shutdown,
+        metrics: Metrics::new(),
+        log_buffer: LogBuffer::new(100),
+        broadcast_tx,
+        health_cache: Arc::new(RwLock::new(None)),
+        started_at: Arc::new(Instant::now()),
+    }
+}
+
+fn postgres_cfg() -> Option<DatabaseConfig> {
+    std::env::var("TEST_POSTGRES_URL").ok().map(|url| DatabaseConfig {
+        url,
+        dialect: Dialect::Postgres,
+    })
+}
+
+fn mysql_cfg() -> Option<DatabaseConfig> {
+    std::env::var("TEST_MYSQL_URL").ok().map(|url| DatabaseConfig {
+        url,
+        dialect: Dialect::MySql,
+    })
+}
+
+async fn smoke_remote_crud(cfg: DatabaseConfig) {
+    let state = build_state_for(cfg).await;
+    let app = build_app(state);
+
+    // Create
+    let res = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/remotes",
+            json!({"name": "pgRemote", "url": "/x", "routePath": "pg-remote"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED, "create remote");
+
+    // List and find it
+    let listed = json_body(app.clone().oneshot(auth_get("/api/remotes")).await.unwrap()).await;
+    let arr = listed["remotes"].as_array().unwrap();
+    assert!(arr.iter().any(|r| r["name"] == "pgRemote"));
+
+    // Toggle (exercises the dialect-aware UPDATE path)
+    let toggle = app
+        .clone()
+        .oneshot(auth_post("/api/remotes/pgRemote/toggle", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(toggle.status(), StatusCode::OK, "toggle remote");
+    let toggled: Value = json_body(toggle).await;
+    assert_eq!(toggled["enabled"], false);
+
+    // Delete
+    let del = app
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/remotes/pgRemote")
+                .header("x-nexus-token", TOKEN)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(del.status(), StatusCode::NO_CONTENT, "delete remote");
+}
+
+async fn smoke_config_upsert(cfg: DatabaseConfig) {
+    // Exercises the dialect-aware upsert helper in config/store.rs — the most
+    // dialect-divergent code path (ON CONFLICT vs ON DUPLICATE KEY UPDATE).
+    let state = build_state_for(cfg).await;
+    let app = build_app(state);
+
+    // PUT twice to force an UPSERT (second call hits the conflict branch).
+    for rps in &[42_u32, 77_u32] {
+        let res = app
+            .clone()
+            .oneshot(auth_put(
+                "/api/config/rate-limiting",
+                json!({"enabled": true, "requestsPerSecond": rps, "burstSize": 100, "by": "ip"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "PUT rate-limiting");
+    }
+
+    let got = json_body(app.oneshot(auth_get("/api/config/rate-limiting")).await.unwrap()).await;
+    assert_eq!(got["requestsPerSecond"], 77);
+}
+
+// Postgres' `CREATE TABLE IF NOT EXISTS` is not race-safe against concurrent
+// sessions, and both PG smoke tests run init against the same database. The
+// MySQL smoke tests reset row state in the shared database between tests.
+// Serialise per-dialect so parallel `cargo test` execution stays sane.
+static PG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static MYSQL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn postgres_remote_crud_smoke() {
+    let _lock = PG_LOCK.lock().await;
+    let Some(cfg) = postgres_cfg() else {
+        eprintln!("skip: TEST_POSTGRES_URL not set");
+        return;
+    };
+    smoke_remote_crud(cfg).await;
+}
+
+#[tokio::test]
+async fn postgres_config_upsert_smoke() {
+    let _lock = PG_LOCK.lock().await;
+    let Some(cfg) = postgres_cfg() else {
+        eprintln!("skip: TEST_POSTGRES_URL not set");
+        return;
+    };
+    smoke_config_upsert(cfg).await;
+}
+
+#[tokio::test]
+async fn mysql_remote_crud_smoke() {
+    let _lock = MYSQL_LOCK.lock().await;
+    let Some(cfg) = mysql_cfg() else {
+        eprintln!("skip: TEST_MYSQL_URL not set");
+        return;
+    };
+    smoke_remote_crud(cfg).await;
+}
+
+#[tokio::test]
+async fn mysql_config_upsert_smoke() {
+    let _lock = MYSQL_LOCK.lock().await;
+    let Some(cfg) = mysql_cfg() else {
+        eprintln!("skip: TEST_MYSQL_URL not set");
+        return;
+    };
+    smoke_config_upsert(cfg).await;
 }
 
 // ---------- Original unified test ----------
