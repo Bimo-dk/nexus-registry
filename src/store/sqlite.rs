@@ -85,6 +85,32 @@ CREATE TABLE IF NOT EXISTS gates (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_gates_host_id ON gates(host_id);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          TEXT PRIMARY KEY,
+    entity_type TEXT NOT NULL,
+    entity_id   TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    meta        TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_log(created_at);
+
+CREATE TABLE IF NOT EXISTS remote_versions (
+    id             TEXT PRIMARY KEY,
+    remote_name    TEXT NOT NULL,
+    version        INTEGER NOT NULL,
+    url            TEXT NOT NULL,
+    exposed_module TEXT NOT NULL,
+    route_path     TEXT NOT NULL,
+    enabled        INTEGER NOT NULL,
+    upstream_url   TEXT,
+    visibility     TEXT NOT NULL,
+    recorded_at    TEXT NOT NULL,
+    UNIQUE (remote_name, version)
+);
+CREATE INDEX IF NOT EXISTS idx_remote_versions_name ON remote_versions(remote_name);
 "#;
 
 const SCHEMA_POSTGRES: &str = r#"
@@ -124,6 +150,32 @@ CREATE TABLE IF NOT EXISTS gates (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_gates_host_id ON gates(host_id);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          VARCHAR(64)  PRIMARY KEY,
+    entity_type VARCHAR(64)  NOT NULL,
+    entity_id   VARCHAR(255) NOT NULL,
+    action      VARCHAR(64)  NOT NULL,
+    actor       VARCHAR(255) NOT NULL,
+    meta        TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_log(created_at);
+
+CREATE TABLE IF NOT EXISTS remote_versions (
+    id             VARCHAR(64)  PRIMARY KEY,
+    remote_name    VARCHAR(255) NOT NULL,
+    version        INTEGER NOT NULL,
+    url            TEXT NOT NULL,
+    exposed_module TEXT NOT NULL,
+    route_path     VARCHAR(255) NOT NULL,
+    enabled        INTEGER NOT NULL,
+    upstream_url   TEXT,
+    visibility     VARCHAR(255) NOT NULL,
+    recorded_at    TEXT NOT NULL,
+    UNIQUE (remote_name, version)
+);
+CREATE INDEX IF NOT EXISTS idx_remote_versions_name ON remote_versions(remote_name);
 "#;
 
 const SCHEMA_MYSQL: &str = r#"
@@ -163,6 +215,39 @@ CREATE TABLE IF NOT EXISTS gates (
     updated_at VARCHAR(64) NOT NULL,
     INDEX idx_gates_host_id (host_id),
     CONSTRAINT fk_gates_host FOREIGN KEY (host_id) REFERENCES hosts(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          VARCHAR(64)  PRIMARY KEY,
+    entity_type VARCHAR(64)  NOT NULL,
+    entity_id   VARCHAR(255) NOT NULL,
+    action      VARCHAR(64)  NOT NULL,
+    actor       VARCHAR(255) NOT NULL,
+    meta        TEXT,
+    created_at  VARCHAR(64)  NOT NULL,
+    INDEX idx_audit_created_at (created_at)
+);
+
+CREATE TABLE IF NOT EXISTS remote_versions (
+    id             VARCHAR(64)  NOT NULL PRIMARY KEY,
+    remote_name    VARCHAR(255) NOT NULL,
+    version        INT NOT NULL,
+    url            TEXT NOT NULL,
+    exposed_module TEXT NOT NULL,
+    route_path     VARCHAR(255) NOT NULL,
+    enabled        INT NOT NULL,
+    upstream_url   TEXT,
+    visibility     VARCHAR(255) NOT NULL,
+    recorded_at    VARCHAR(64)  NOT NULL,
+    UNIQUE KEY uq_remote_versions (remote_name, version),
+    INDEX idx_remote_versions_name (remote_name)
+);
+
+CREATE TABLE IF NOT EXISTS event_queue (
+    id         VARCHAR(64) NOT NULL PRIMARY KEY,
+    payload    TEXT NOT NULL,
+    origin     VARCHAR(64) NOT NULL,
+    created_at VARCHAR(64) NOT NULL
 );
 "#;
 
@@ -351,6 +436,16 @@ async fn import_legacy_json(db: &Db, data_dir: &Path) -> Result<(), StoreError> 
     Ok(())
 }
 
+// ---- Pagination ----
+
+/// Caller-supplied LIMIT/OFFSET. Both `list` and `list_for_host` accept
+/// `Option<&ListPage>`: `None` returns everything (backward-compatible);
+/// `Some` returns a window and a total count from a separate COUNT(*).
+pub struct ListPage {
+    pub limit: u64,
+    pub offset: u64,
+}
+
 // ---- Remote CRUD ----
 
 fn row_to_remote(r: &sqlx::any::AnyRow) -> Result<RemoteConfig, sqlx::Error> {
@@ -371,36 +466,93 @@ fn row_to_remote(r: &sqlx::any::AnyRow) -> Result<RemoteConfig, sqlx::Error> {
     })
 }
 
-pub async fn list(db: &Db) -> Result<Vec<RemoteConfig>, StoreError> {
-    let sql = db.dialect.render(
+/// Returns all remotes, or a page window when `page` is supplied.
+/// The second element of the tuple is the total count of matching rows
+/// (pre-pagination); when `page` is `None` it equals the returned vec length.
+pub async fn list(db: &Db, page: Option<&ListPage>) -> Result<(Vec<RemoteConfig>, u64), StoreError> {
+    const BASE: &str =
         "SELECT name, url, exposed_module, route_path, enabled, added_at, upstream_url, \
-         health_status, last_health_check, visibility FROM remotes ORDER BY added_at",
-    );
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
-        .fetch_all(db.pool())
-        .await?;
-    rows.iter()
-        .map(row_to_remote)
-        .collect::<Result<_, _>>()
-        .map_err(Into::into)
+         health_status, last_health_check, visibility FROM remotes ORDER BY added_at";
+    match page {
+        None => {
+            let sql = db.dialect.render(BASE);
+            let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+                .fetch_all(db.pool())
+                .await?;
+            let items: Vec<RemoteConfig> = rows.iter()
+                .map(row_to_remote)
+                .collect::<Result<_, sqlx::Error>>()
+                .map_err(StoreError::Db)?;
+            let total = items.len() as u64;
+            Ok((items, total))
+        }
+        Some(p) => {
+            let total: i64 = sqlx::query_scalar(db.dialect.prep("SELECT COUNT(*) FROM remotes"))
+                .fetch_one(db.pool())
+                .await?;
+            let paged = format!("{BASE} LIMIT ? OFFSET ?");
+            let paged_sql = db.dialect.render(&paged);
+            let rows = sqlx::query(sqlx::AssertSqlSafe(paged_sql.as_ref()))
+                .bind(p.limit as i64)
+                .bind(p.offset as i64)
+                .fetch_all(db.pool())
+                .await?;
+            let items: Vec<RemoteConfig> = rows.iter()
+                .map(row_to_remote)
+                .collect::<Result<_, sqlx::Error>>()
+                .map_err(StoreError::Db)?;
+            Ok((items, total as u64))
+        }
+    }
 }
 
 /// Returns global remotes plus host-specific remotes for the given host id.
-pub async fn list_for_host(db: &Db, host_id: &str) -> Result<Vec<RemoteConfig>, StoreError> {
+pub async fn list_for_host(
+    db: &Db,
+    host_id: &str,
+    page: Option<&ListPage>,
+) -> Result<(Vec<RemoteConfig>, u64), StoreError> {
     let host_visibility = format!("host:{}", host_id);
-    let sql = db.dialect.render(
+    const BASE: &str =
         "SELECT name, url, exposed_module, route_path, enabled, added_at, upstream_url, \
          health_status, last_health_check, visibility FROM remotes \
-         WHERE visibility = 'global' OR visibility = ? ORDER BY added_at",
-    );
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
-        .bind(&host_visibility)
-        .fetch_all(db.pool())
-        .await?;
-    rows.iter()
-        .map(row_to_remote)
-        .collect::<Result<_, _>>()
-        .map_err(Into::into)
+         WHERE visibility = 'global' OR visibility = ? ORDER BY added_at";
+    match page {
+        None => {
+            let sql = db.dialect.render(BASE);
+            let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+                .bind(&host_visibility)
+                .fetch_all(db.pool())
+                .await?;
+            let items: Vec<RemoteConfig> = rows.iter()
+                .map(row_to_remote)
+                .collect::<Result<_, sqlx::Error>>()
+                .map_err(StoreError::Db)?;
+            let total = items.len() as u64;
+            Ok((items, total))
+        }
+        Some(p) => {
+            const COUNT_SQL: &str =
+                "SELECT COUNT(*) FROM remotes WHERE visibility = 'global' OR visibility = ?";
+            let total: i64 = sqlx::query_scalar(db.dialect.prep(COUNT_SQL))
+                .bind(&host_visibility)
+                .fetch_one(db.pool())
+                .await?;
+            let paged = format!("{BASE} LIMIT ? OFFSET ?");
+            let paged_sql = db.dialect.render(&paged);
+            let rows = sqlx::query(sqlx::AssertSqlSafe(paged_sql.as_ref()))
+                .bind(&host_visibility)
+                .bind(p.limit as i64)
+                .bind(p.offset as i64)
+                .fetch_all(db.pool())
+                .await?;
+            let items: Vec<RemoteConfig> = rows.iter()
+                .map(row_to_remote)
+                .collect::<Result<_, sqlx::Error>>()
+                .map_err(StoreError::Db)?;
+            Ok((items, total as u64))
+        }
+    }
 }
 
 pub async fn get(db: &Db, name: &str) -> Result<Option<RemoteConfig>, StoreError> {
@@ -543,4 +695,46 @@ pub async fn toggle(db: &Db, name: &str) -> Result<Option<RemoteConfig>, StoreEr
         .await?;
     tx.commit().await?;
     get(db, name).await
+}
+
+fn placeholders(n: usize) -> String {
+    std::iter::repeat_n("?", n).collect::<Vec<_>>().join(", ")
+}
+
+/// Sets `enabled` to the given value for all named remotes in a single UPDATE.
+/// Returns the number of rows actually changed.
+pub async fn toggle_many(db: &Db, names: &[String], enabled: bool) -> Result<u64, StoreError> {
+    if names.is_empty() {
+        return Ok(0);
+    }
+    let raw = format!(
+        "UPDATE remotes SET enabled = ? WHERE name IN ({})",
+        placeholders(names.len())
+    );
+    let sql = db.dialect.render(&raw);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).bind(enabled as i64);
+    for name in names {
+        q = q.bind(name.as_str());
+    }
+    let res = q.execute(db.pool()).await?;
+    Ok(res.rows_affected())
+}
+
+/// Deletes all named remotes in a single DELETE.
+/// Returns the number of rows removed.
+pub async fn delete_many(db: &Db, names: &[String]) -> Result<u64, StoreError> {
+    if names.is_empty() {
+        return Ok(0);
+    }
+    let raw = format!(
+        "DELETE FROM remotes WHERE name IN ({})",
+        placeholders(names.len())
+    );
+    let sql = db.dialect.render(&raw);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()));
+    for name in names {
+        q = q.bind(name.as_str());
+    }
+    let res = q.execute(db.pool()).await?;
+    Ok(res.rows_affected())
 }

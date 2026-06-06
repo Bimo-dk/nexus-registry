@@ -173,10 +173,12 @@ fn message_kind(msg: &ServerMessage) -> &'static str {
 }
 
 pub fn broadcast_host_changed(state: &AppState, host: Host, trigger: impl Into<String>) {
+    let trigger = trigger.into();
+    crate::replication::publish(&state.db, "host_changed", Some(&host.id), &trigger);
     let _ = state.broadcast_tx.send(ServerMessage::HostChanged {
         timestamp: iso_now(),
         host,
-        trigger: trigger.into(),
+        trigger,
     });
 }
 
@@ -187,30 +189,33 @@ pub fn broadcast_gate_changed(
     old_host_id: Option<String>,
     new_host_id: Option<String>,
 ) {
+    let trigger = trigger.into();
+    crate::replication::publish(&state.db, "gate_changed", Some(&gate.gate.name), &trigger);
     let _ = state.broadcast_tx.send(ServerMessage::GateChanged {
         timestamp: iso_now(),
         gate,
-        trigger: trigger.into(),
+        trigger,
         old_host_id,
         new_host_id,
     });
 }
 
 pub async fn broadcast_remotes_changed(state: &AppState, trigger: impl Into<String>) {
+    let trigger = trigger.into();
+    crate::replication::publish(&state.db, "remotes_changed", None, &trigger);
     let tx = &state.broadcast_tx;
     if tx.receiver_count() == 0 {
         return;
     }
-    let remotes = match store::list(&state.db).await {
-        Ok(r) => r,
+    let remotes = match store::list(&state.db, None).await {
+        Ok((r, _)) => r,
         Err(_) => return,
     };
-    let msg = ServerMessage::RemotesChanged {
+    let _ = tx.send(ServerMessage::RemotesChanged {
         timestamp: iso_now(),
         remotes,
-        trigger: trigger.into(),
-    };
-    let _ = tx.send(msg);
+        trigger,
+    });
 }
 
 pub fn broadcast_system_health(state: &AppState, snapshot_value: Value) {

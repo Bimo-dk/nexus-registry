@@ -4,6 +4,7 @@ mod correlation;
 mod features;
 mod http_error;
 mod observability;
+mod replication;
 mod state;
 mod store;
 mod system_health;
@@ -65,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("[registry] database configuration error: {e}"))?;
     info!("[registry] Connecting to {} database", db_cfg.dialect.as_str());
     let db = store::init(&db_cfg, &env.data_dir).await?;
-    let initial = store::list(&db).await?;
+    let (initial, _) = store::list(&db, None).await?;
     info!(
         "[registry] Loaded {} remote(s) from {} ({})",
         initial.len(),
@@ -101,6 +102,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     shutdown
         .clone()
         .spawn_orchestrator(config_store.clone(), broadcast_tx.clone());
+
+    replication::start_listener(state.clone(), db_cfg.url.clone());
 
     spawn_signal_listener(shutdown.clone());
 

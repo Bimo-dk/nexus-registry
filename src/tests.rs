@@ -552,7 +552,7 @@ async fn host_create_returns_gate_count_zero() {
     assert_eq!(host["framework"], "angular");
 
     let listed = json_body(app.oneshot(auth_get("/api/hosts")).await.unwrap()).await;
-    let arr = listed.as_array().unwrap();
+    let arr = listed["hosts"].as_array().unwrap();
     let found = arr.iter().find(|h| h["id"] == id).unwrap();
     assert_eq!(found["gateCount"], 0);
 }
@@ -871,6 +871,7 @@ async fn build_state_for(cfg: DatabaseConfig) -> AppState {
         "DELETE FROM gates",
         "DELETE FROM hosts",
         "DELETE FROM remotes",
+        "DELETE FROM audit_log",
     ] {
         let _ = sqlx::query(*stmt).execute(db.pool()).await;
     }
@@ -1048,6 +1049,577 @@ async fn mysql_config_upsert_smoke() {
         return;
     };
     smoke_config_upsert(cfg).await;
+}
+
+// ---------- Pagination ----------
+
+#[tokio::test]
+async fn remotes_list_pagination_returns_page_metadata() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    for i in 0..5u32 {
+        let res = app
+            .clone()
+            .oneshot(auth_post(
+                "/api/remotes",
+                json!({ "name": format!("remote{}", i), "url": "/x", "routePath": format!("remote-{}", i) }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    let res = app.oneshot(auth_get("/api/remotes?page=1&limit=2")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_body(res).await;
+
+    assert_eq!(body["remotes"].as_array().unwrap().len(), 2);
+    assert_eq!(body["total"], 5);
+    assert_eq!(body["page"], 1);
+    assert_eq!(body["pageSize"], 2);
+    assert_eq!(body["pageCount"], 3);
+}
+
+#[tokio::test]
+async fn remotes_list_no_page_params_returns_all_without_pagination_fields() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    for i in 0..3u32 {
+        let res = app
+            .clone()
+            .oneshot(auth_post(
+                "/api/remotes",
+                json!({ "name": format!("np{}", i), "url": "/x", "routePath": format!("np-{}", i) }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    let body = json_body(app.oneshot(auth_get("/api/remotes")).await.unwrap()).await;
+    assert_eq!(body["remotes"].as_array().unwrap().len(), 3);
+    assert_eq!(body["total"], 3);
+    assert!(body["page"].is_null());
+    assert!(body["pageSize"].is_null());
+    assert!(body["pageCount"].is_null());
+}
+
+#[tokio::test]
+async fn remotes_list_page_two_returns_correct_slice() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    for i in 0..5u32 {
+        let res = app
+            .clone()
+            .oneshot(auth_post(
+                "/api/remotes",
+                json!({ "name": format!("pg{}", i), "url": "/x", "routePath": format!("pg-{}", i) }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    let p2 = json_body(app.oneshot(auth_get("/api/remotes?page=2&limit=2")).await.unwrap()).await;
+    assert_eq!(p2["remotes"].as_array().unwrap().len(), 2);
+    assert_eq!(p2["page"], 2);
+    assert_eq!(p2["total"], 5);
+}
+
+#[tokio::test]
+async fn hosts_list_pagination_returns_page_metadata() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    for i in 0..4u32 {
+        create_host(app.clone(), &format!("hostPg{}", i), "angular").await;
+    }
+
+    let res = app.oneshot(auth_get("/api/hosts?page=1&limit=2")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_body(res).await;
+
+    assert_eq!(body["hosts"].as_array().unwrap().len(), 2);
+    assert_eq!(body["total"], 4);
+    assert_eq!(body["page"], 1);
+    assert_eq!(body["pageSize"], 2);
+    assert_eq!(body["pageCount"], 2);
+}
+
+#[tokio::test]
+async fn hosts_list_no_params_returns_all_without_pagination_fields() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    create_host(app.clone(), "hostNpA", "vue").await;
+    create_host(app.clone(), "hostNpB", "react").await;
+
+    let body = json_body(app.oneshot(auth_get("/api/hosts")).await.unwrap()).await;
+    assert_eq!(body["hosts"].as_array().unwrap().len(), 2);
+    assert_eq!(body["total"], 2);
+    assert!(body["page"].is_null());
+}
+
+#[tokio::test]
+async fn gates_list_pagination_returns_page_metadata() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    for i in 0..4u32 {
+        let res = app
+            .clone()
+            .oneshot(auth_post(
+                "/api/gates",
+                json!({ "name": format!("gPg{}", i), "domain": format!("pg{}.example.com", i) }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    let res = app.oneshot(auth_get("/api/gates?page=1&limit=3")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_body(res).await;
+
+    assert_eq!(body["gates"].as_array().unwrap().len(), 3);
+    assert_eq!(body["total"], 4);
+    assert_eq!(body["page"], 1);
+    assert_eq!(body["pageSize"], 3);
+    assert_eq!(body["pageCount"], 2);
+}
+
+// ---------- Bulk operations ----------
+
+#[tokio::test]
+async fn bulk_toggle_remotes_sets_enabled_state() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    for (name, route) in &[("bulkA", "bulk-a"), ("bulkB", "bulk-b"), ("bulkC", "bulk-c")] {
+        let res = app
+            .clone()
+            .oneshot(auth_post(
+                "/api/remotes",
+                json!({ "name": name, "url": "/x", "routePath": route }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED, "create {}", name);
+    }
+
+    let res = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/remotes/bulk-toggle",
+            json!({ "names": ["bulkA", "bulkB"], "enabled": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_body(res).await;
+    assert_eq!(body["affected"], 2);
+    assert_eq!(body["enabled"], false);
+
+    let listed = json_body(app.oneshot(auth_get("/api/remotes")).await.unwrap()).await;
+    let remotes = listed["remotes"].as_array().unwrap();
+    let a = remotes.iter().find(|r| r["name"] == "bulkA").unwrap();
+    let c = remotes.iter().find(|r| r["name"] == "bulkC").unwrap();
+    assert_eq!(a["enabled"], false);
+    assert_eq!(c["enabled"], true);
+}
+
+#[tokio::test]
+async fn bulk_delete_remotes_removes_all_named() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    for (name, route) in &[("delA", "del-a"), ("delB", "del-b"), ("delC", "del-c")] {
+        let res = app
+            .clone()
+            .oneshot(auth_post(
+                "/api/remotes",
+                json!({ "name": name, "url": "/x", "routePath": route }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED, "create {}", name);
+    }
+
+    let res = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/remotes/bulk-delete",
+            json!({ "names": ["delA", "delC"] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_body(res).await;
+    assert_eq!(body["affected"], 2);
+
+    let listed = json_body(app.oneshot(auth_get("/api/remotes")).await.unwrap()).await;
+    let names: Vec<&str> = listed["remotes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert!(!names.contains(&"delA"));
+    assert!(names.contains(&"delB"));
+    assert!(!names.contains(&"delC"));
+}
+
+#[tokio::test]
+async fn bulk_toggle_remotes_empty_names_returns_400() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    let res = app
+        .oneshot(auth_post(
+            "/api/remotes/bulk-toggle",
+            json!({ "names": [], "enabled": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn bulk_toggle_hosts_sets_enabled_state() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    let ha = create_host(app.clone(), "bulkHostA", "angular").await;
+    let hb = create_host(app.clone(), "bulkHostB", "vue").await;
+    let id_a = ha["id"].as_str().unwrap().to_string();
+    let id_b = hb["id"].as_str().unwrap().to_string();
+
+    let res = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/hosts/bulk-toggle",
+            json!({ "ids": [id_a.clone()], "enabled": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_body(res).await;
+    assert_eq!(body["affected"], 1);
+
+    let detail_a = json_body(app.clone().oneshot(auth_get(&format!("/api/hosts/{}", id_a))).await.unwrap()).await;
+    let detail_b = json_body(app.oneshot(auth_get(&format!("/api/hosts/{}", id_b))).await.unwrap()).await;
+    assert_eq!(detail_a["enabled"], false);
+    assert_eq!(detail_b["enabled"], true);
+}
+
+#[tokio::test]
+async fn bulk_toggle_gates_sets_enabled_state() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    let g1 = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/gates",
+            json!({ "name": "bGateOne", "domain": "bulk-one.example.com" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(g1.status(), StatusCode::CREATED);
+    let g1_body = json_body(g1).await;
+    let g1_id = g1_body["id"].as_str().unwrap().to_string();
+
+    let g2 = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/gates",
+            json!({ "name": "bGateTwo", "domain": "bulk-two.example.com" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(g2.status(), StatusCode::CREATED);
+    let g2_body = json_body(g2).await;
+    let g2_id = g2_body["id"].as_str().unwrap().to_string();
+
+    let res = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/gates/bulk-toggle",
+            json!({ "ids": [g1_id.clone()], "enabled": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_body(res).await;
+    assert_eq!(body["affected"], 1);
+
+    let d1 = json_body(app.clone().oneshot(auth_get(&format!("/api/gates/{}", g1_id))).await.unwrap()).await;
+    let d2 = json_body(app.oneshot(auth_get(&format!("/api/gates/{}", g2_id))).await.unwrap()).await;
+    assert_eq!(d1["enabled"], false);
+    assert_eq!(d2["enabled"], true);
+}
+
+// ---------- Versioning ----------
+
+#[tokio::test]
+async fn version_recorded_on_create() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    let res = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/remotes",
+            json!({ "name": "verR", "url": "/v1", "routePath": "ver-r" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    let body = json_body(app.oneshot(auth_get("/api/remotes/verR/versions")).await.unwrap()).await;
+    assert_eq!(body["total"], 1);
+    let v = &body["versions"][0];
+    assert_eq!(v["version"], 1);
+    assert_eq!(v["url"], "/v1");
+    assert_eq!(v["remoteName"], "verR");
+}
+
+#[tokio::test]
+async fn version_recorded_on_update() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    let res = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/remotes",
+            json!({ "name": "verU", "url": "/v1", "routePath": "ver-u" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    let res = app
+        .clone()
+        .oneshot(auth_put("/api/remotes/verU", json!({ "url": "/v2" })))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = json_body(app.oneshot(auth_get("/api/remotes/verU/versions")).await.unwrap()).await;
+    assert_eq!(body["total"], 2);
+    assert_eq!(body["versions"][0]["version"], 2);
+    assert_eq!(body["versions"][0]["url"], "/v2");
+    assert_eq!(body["versions"][1]["version"], 1);
+    assert_eq!(body["versions"][1]["url"], "/v1");
+}
+
+#[tokio::test]
+async fn rollback_restores_config_and_creates_new_version() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    let res = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/remotes",
+            json!({ "name": "verRb", "url": "/v1", "routePath": "ver-rb" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    let res = app
+        .clone()
+        .oneshot(auth_put("/api/remotes/verRb", json!({ "url": "/v2" })))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Rollback to version 1
+    let res = app
+        .clone()
+        .oneshot(auth_post("/api/remotes/verRb/rollback", json!({ "version": 1 })))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_body(res).await;
+    assert_eq!(body["url"], "/v1");
+
+    // The live remote is now at /v1
+    let live = json_body(app.clone().oneshot(auth_get("/api/remotes/verRb")).await.unwrap()).await;
+    assert_eq!(live["url"], "/v1");
+
+    // Rollback created version 3
+    let versions =
+        json_body(app.oneshot(auth_get("/api/remotes/verRb/versions")).await.unwrap()).await;
+    assert_eq!(versions["total"], 3);
+    assert_eq!(versions["versions"][0]["version"], 3);
+    assert_eq!(versions["versions"][0]["url"], "/v1");
+}
+
+#[tokio::test]
+async fn rollback_to_nonexistent_version_returns_404() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    let res = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/remotes",
+            json!({ "name": "ver404", "url": "/x", "routePath": "ver-404" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    let res = app
+        .oneshot(auth_post("/api/remotes/ver404/rollback", json!({ "version": 99 })))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn versions_endpoint_on_unknown_remote_returns_404() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    let res = app
+        .oneshot(auth_get("/api/remotes/doesNotExist/versions"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------- Audit log ----------
+
+#[tokio::test]
+async fn audit_log_records_remote_create() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    let res = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/remotes",
+            json!({ "name": "auditR", "url": "/x", "routePath": "audit-r" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+
+    tokio::task::yield_now().await;
+
+    let body = json_body(app.oneshot(auth_get("/api/system/audit")).await.unwrap()).await;
+    let entries = body["entries"].as_array().unwrap();
+    let entry = entries.iter().find(|e| e["action"] == "created" && e["entityType"] == "remote");
+    assert!(entry.is_some(), "expected a remote create entry");
+    assert_eq!(entry.unwrap()["entityId"], "auditR");
+}
+
+#[tokio::test]
+async fn audit_log_records_remote_delete() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    let _ = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/remotes",
+            json!({ "name": "auditDel", "url": "/x", "routePath": "audit-del" }),
+        ))
+        .await
+        .unwrap();
+    let del = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/remotes/auditDel")
+                .header("x-nexus-token", TOKEN)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(del.status(), StatusCode::NO_CONTENT);
+
+    tokio::task::yield_now().await;
+
+    let body = json_body(app.oneshot(auth_get("/api/system/audit")).await.unwrap()).await;
+    let entries = body["entries"].as_array().unwrap();
+    assert!(
+        entries.iter().any(|e| e["action"] == "deleted" && e["entityId"] == "auditDel"),
+        "expected a delete audit entry"
+    );
+}
+
+#[tokio::test]
+async fn audit_log_filters_by_entity_type() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    let _ = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/remotes",
+            json!({ "name": "auditFR", "url": "/x", "routePath": "audit-fr" }),
+        ))
+        .await
+        .unwrap();
+    let host = create_host(app.clone(), "auditFH", "angular").await;
+    let host_id = host["id"].as_str().unwrap().to_string();
+
+    tokio::task::yield_now().await;
+
+    let body =
+        json_body(app.oneshot(auth_get("/api/system/audit?entity_type=host")).await.unwrap()).await;
+    let entries = body["entries"].as_array().unwrap();
+    assert!(entries.iter().all(|e| e["entityType"] == "host"), "should only contain host entries");
+    assert!(
+        entries.iter().any(|e| e["entityId"] == host_id),
+        "expected host create entry"
+    );
+}
+
+#[tokio::test]
+async fn audit_log_records_bulk_toggle() {
+    let state = build_test_state().await;
+    let app = build_app(state);
+
+    for (name, route) in &[("audBulkA", "aud-bulk-a"), ("audBulkB", "aud-bulk-b")] {
+        let res = app
+            .clone()
+            .oneshot(auth_post(
+                "/api/remotes",
+                json!({ "name": name, "url": "/x", "routePath": route }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED, "create {}", name);
+    }
+
+    let res = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/remotes/bulk-toggle",
+            json!({ "names": ["audBulkA", "audBulkB"], "enabled": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    tokio::task::yield_now().await;
+
+    let body =
+        json_body(app.oneshot(auth_get("/api/system/audit?action=bulk_toggle")).await.unwrap()).await;
+    let entries = body["entries"].as_array().unwrap();
+    assert!(!entries.is_empty(), "expected at least one bulk_toggle audit entry");
+    assert!(entries.iter().all(|e| e["action"] == "bulk_toggle"));
 }
 
 // ---------- Original unified test ----------

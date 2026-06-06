@@ -3,7 +3,7 @@
 
 use sqlx::Row;
 
-use crate::store::sqlite::{is_unique_violation_pub as is_unique_violation, Db, StoreError};
+use crate::store::sqlite::{is_unique_violation_pub as is_unique_violation, Db, ListPage, StoreError};
 use crate::types::{Gate, GateWithHost, Host, HostWithGateCount, UpdateGateRequest, UpdateHostRequest};
 
 // ============================================================================
@@ -24,25 +24,51 @@ fn row_to_host(r: &sqlx::any::AnyRow) -> Result<Host, sqlx::Error> {
     })
 }
 
-pub async fn list_hosts(db: &Db) -> Result<Vec<HostWithGateCount>, StoreError> {
-    let sql = db.dialect.render(
+pub async fn list_hosts(db: &Db, page: Option<&ListPage>) -> Result<(Vec<HostWithGateCount>, u64), StoreError> {
+    const BASE: &str =
         "SELECT h.id, h.name, h.url, h.framework, h.remote_entry, h.exposed_module, \
          h.enabled, h.created_at, h.updated_at, COUNT(g.id) AS gate_count \
          FROM hosts h LEFT JOIN gates g ON g.host_id = h.id \
          GROUP BY h.id, h.name, h.url, h.framework, h.remote_entry, h.exposed_module, \
                   h.enabled, h.created_at, h.updated_at \
-         ORDER BY h.created_at",
-    );
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
-        .fetch_all(db.pool())
-        .await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
-        let host = row_to_host(&r)?;
-        let gate_count: i64 = r.try_get("gate_count")?;
-        out.push(HostWithGateCount { host, gate_count });
+         ORDER BY h.created_at";
+
+    fn extract(rows: Vec<sqlx::any::AnyRow>) -> Result<Vec<HostWithGateCount>, sqlx::Error> {
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let host = row_to_host(&r)?;
+            let gate_count: i64 = r.try_get("gate_count")?;
+            out.push(HostWithGateCount { host, gate_count });
+        }
+        Ok(out)
     }
-    Ok(out)
+
+    match page {
+        None => {
+            let sql = db.dialect.render(BASE);
+            let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+                .fetch_all(db.pool())
+                .await?;
+            let items = extract(rows).map_err(StoreError::Db)?;
+            let total = items.len() as u64;
+            Ok((items, total))
+        }
+        Some(p) => {
+            let count_sql = db.dialect.render("SELECT COUNT(*) FROM hosts");
+            let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql.as_ref()))
+                .fetch_one(db.pool())
+                .await?;
+            let paged = format!("{BASE} LIMIT ? OFFSET ?");
+            let paged_sql = db.dialect.render(&paged);
+            let rows = sqlx::query(sqlx::AssertSqlSafe(paged_sql.as_ref()))
+                .bind(p.limit as i64)
+                .bind(p.offset as i64)
+                .fetch_all(db.pool())
+                .await?;
+            let items = extract(rows).map_err(StoreError::Db)?;
+            Ok((items, total as u64))
+        }
+    }
 }
 
 pub async fn get_host(db: &Db, id_or_name: &str) -> Result<Option<Host>, StoreError> {
@@ -277,17 +303,42 @@ const GATE_WITH_HOST_SELECT: &str =
      h.enabled AS h_enabled, h.created_at AS h_created_at, h.updated_at AS h_updated_at \
      FROM gates g LEFT JOIN hosts h ON h.id = g.host_id";
 
-pub async fn list_gates(db: &Db) -> Result<Vec<GateWithHost>, StoreError> {
-    let raw = format!("{} ORDER BY g.created_at", GATE_WITH_HOST_SELECT);
-    let sql = db.dialect.render(&raw);
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
-        .fetch_all(db.pool())
-        .await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
-        out.push(row_to_gate_with_host(&r)?);
+pub async fn list_gates(db: &Db, page: Option<&ListPage>) -> Result<(Vec<GateWithHost>, u64), StoreError> {
+    fn extract(rows: Vec<sqlx::any::AnyRow>) -> Result<Vec<GateWithHost>, sqlx::Error> {
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(row_to_gate_with_host(&r)?);
+        }
+        Ok(out)
     }
-    Ok(out)
+
+    match page {
+        None => {
+            let raw = format!("{GATE_WITH_HOST_SELECT} ORDER BY g.created_at");
+            let sql = db.dialect.render(&raw);
+            let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+                .fetch_all(db.pool())
+                .await?;
+            let items = extract(rows).map_err(StoreError::Db)?;
+            let total = items.len() as u64;
+            Ok((items, total))
+        }
+        Some(p) => {
+            let count_sql = db.dialect.render("SELECT COUNT(*) FROM gates");
+            let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql.as_ref()))
+                .fetch_one(db.pool())
+                .await?;
+            let paged = format!("{GATE_WITH_HOST_SELECT} ORDER BY g.created_at LIMIT ? OFFSET ?");
+            let paged_sql = db.dialect.render(&paged);
+            let rows = sqlx::query(sqlx::AssertSqlSafe(paged_sql.as_ref()))
+                .bind(p.limit as i64)
+                .bind(p.offset as i64)
+                .fetch_all(db.pool())
+                .await?;
+            let items = extract(rows).map_err(StoreError::Db)?;
+            Ok((items, total as u64))
+        }
+    }
 }
 
 pub async fn get_gate(db: &Db, id_or_name: &str) -> Result<Option<GateWithHost>, StoreError> {
@@ -424,6 +475,50 @@ pub async fn delete_gate(db: &Db, id_or_name: &str) -> Result<Option<Gate>, Stor
         .await?;
     tx.commit().await?;
     Ok(Some(existing))
+}
+
+fn placeholders(n: usize) -> String {
+    std::iter::repeat_n("?", n).collect::<Vec<_>>().join(", ")
+}
+
+/// Sets `enabled` for each host ID in a single UPDATE. Returns affected count.
+pub async fn toggle_hosts_many(db: &Db, ids: &[String], enabled: bool, now: &str) -> Result<u64, StoreError> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let raw = format!(
+        "UPDATE hosts SET enabled = ?, updated_at = ? WHERE id IN ({})",
+        placeholders(ids.len())
+    );
+    let sql = db.dialect.render(&raw);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .bind(enabled as i64)
+        .bind(now);
+    for id in ids {
+        q = q.bind(id.as_str());
+    }
+    let res = q.execute(db.pool()).await?;
+    Ok(res.rows_affected())
+}
+
+/// Sets `enabled` for each gate ID in a single UPDATE. Returns affected count.
+pub async fn toggle_gates_many(db: &Db, ids: &[String], enabled: bool, now: &str) -> Result<u64, StoreError> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let raw = format!(
+        "UPDATE gates SET enabled = ?, updated_at = ? WHERE id IN ({})",
+        placeholders(ids.len())
+    );
+    let sql = db.dialect.render(&raw);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .bind(enabled as i64)
+        .bind(now);
+    for id in ids {
+        q = q.bind(id.as_str());
+    }
+    let res = q.execute(db.pool()).await?;
+    Ok(res.rows_affected())
 }
 
 pub async fn toggle_gate(db: &Db, id_or_name: &str, now: &str) -> Result<Option<Gate>, StoreError> {

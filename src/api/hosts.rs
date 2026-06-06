@@ -1,10 +1,11 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
     Extension, Json, Router,
 };
+use serde::Deserialize;
 use serde_json::json;
 use tracing::error;
 use ulid::Ulid;
@@ -12,23 +13,60 @@ use ulid::Ulid;
 use crate::correlation::CorrelationId;
 use crate::http_error::error_response;
 use crate::state::AppState;
-use crate::store::{self, DeleteHostOutcome, StoreError};
+use crate::store::{self, audit, DeleteHostOutcome, ListPage, StoreError};
 use crate::time::iso_now;
-use crate::types::{CreateHostRequest, Host, UpdateHostRequest};
+use crate::types::{BulkIdsToggleRequest, CreateHostRequest, Host, HostsListResponse, UpdateHostRequest};
 use crate::validators::{is_valid_entity_name, is_valid_framework, is_valid_host_url, is_valid_remote_entry};
 use crate::ws::{broadcast_host_changed, broadcast_remotes_changed};
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list).post(create))
+        .route("/bulk-toggle", post(bulk_toggle))
         .route("/{id}", get(detail).put(update).delete(remove))
         .route("/{id}/remotes", get(list_remotes_for_host))
         .route("/{id}/toggle", post(toggle))
 }
 
-async fn list(State(state): State<AppState>, Extension(cid): Extension<CorrelationId>) -> Response {
-    match store::list_hosts(&state.db).await {
-        Ok(hosts) => Json(hosts).into_response(),
+const MAX_PAGE_SIZE: u32 = 200;
+const MAX_BULK: usize = 100;
+
+#[derive(Deserialize)]
+struct ListQuery {
+    page: Option<u32>,
+    limit: Option<u32>,
+}
+
+fn parse_page(q_page: Option<u32>, q_limit: Option<u32>) -> Option<ListPage> {
+    match (q_page, q_limit) {
+        (None, None) => None,
+        (pg, lim) => {
+            let limit = lim.unwrap_or(50).clamp(1, MAX_PAGE_SIZE) as u64;
+            let page = pg.unwrap_or(1).max(1) as u64;
+            Some(ListPage { limit, offset: (page - 1) * limit })
+        }
+    }
+}
+
+async fn list(
+    State(state): State<AppState>,
+    Query(q): Query<ListQuery>,
+    Extension(cid): Extension<CorrelationId>,
+) -> Response {
+    let lp = parse_page(q.page, q.limit);
+    match store::list_hosts(&state.db, lp.as_ref()).await {
+        Ok((hosts, total)) => {
+            let (page, page_size, page_count) = match &lp {
+                None => (None, None, None),
+                Some(p) => {
+                    let page_num = (p.offset / p.limit + 1) as u32;
+                    let pc = if p.limit > 0 { ((total + p.limit - 1) / p.limit) as u32 } else { 0 };
+                    (Some(page_num), Some(p.limit as u32), Some(pc))
+                }
+            };
+            Json(HostsListResponse { hosts, total: total as usize, page, page_size, page_count })
+                .into_response()
+        }
         Err(e) => server_error(e, &cid),
     }
 }
@@ -56,8 +94,8 @@ async fn list_remotes_for_host(
         Err(e) => return server_error(e, &cid),
     };
     let host_visibility = format!("host:{}", host.id);
-    match store::list_for_host(&state.db, &host.id).await {
-        Ok(remotes) => {
+    match store::list_for_host(&state.db, &host.id, None).await {
+        Ok((remotes, _)) => {
             let with_source: Vec<_> = remotes
                 .into_iter()
                 .map(|r| {
@@ -73,13 +111,12 @@ async fn list_remotes_for_host(
                     value
                 })
                 .collect();
-            // Touch `host_visibility` so the binding is observed by the compiler — used as
-            // the source label boundary above.
             let _ = host_visibility;
+            let total = with_source.len();
             Json(json!({
                 "hostId": host.id,
                 "remotes": with_source,
-                "total": with_source.len(),
+                "total": total,
             }))
             .into_response()
         }
@@ -127,6 +164,7 @@ async fn create(
 
     match store::insert_host(&state.db, &host).await {
         Ok(()) => {
+            audit::append(state.db.clone(), "host", &host.id, "created", cid.as_str(), None);
             let res = (StatusCode::CREATED, Json(host.clone())).into_response();
             broadcast_host_changed(&state, host, "created");
             res
@@ -185,6 +223,7 @@ async fn update(
     let now = iso_now();
     match store::update_host(&state.db, &id, &body, &now).await {
         Ok(Some(host)) => {
+            audit::append(state.db.clone(), "host", &host.id, "updated", cid.as_str(), None);
             let res = Json(host.clone()).into_response();
             broadcast_host_changed(&state, host, "updated");
             res
@@ -207,9 +246,8 @@ async fn remove(
 ) -> Response {
     match store::delete_host(&state.db, &id).await {
         Ok(DeleteHostOutcome::Deleted(host)) => {
+            audit::append(state.db.clone(), "host", &host.id, "deleted", cid.as_str(), None);
             broadcast_host_changed(&state, host, "deleted");
-            // Also tell hosts that any host-specific remote rows might have moved (no-op
-            // delete cascading here, but `remotes_changed` is the standard cache-bust signal).
             broadcast_remotes_changed(&state, "host_deleted").await;
             StatusCode::NO_CONTENT.into_response()
         }
@@ -236,11 +274,58 @@ async fn toggle(
     let now = iso_now();
     match store::toggle_host(&state.db, &id, &now).await {
         Ok(Some(host)) => {
+            audit::append(state.db.clone(), "host", &host.id, "toggled", cid.as_str(), None);
             let res = Json(host.clone()).into_response();
             broadcast_host_changed(&state, host, "toggle");
             res
         }
         Ok(None) => not_found(&id, &cid),
+        Err(e) => server_error(e, &cid),
+    }
+}
+
+async fn bulk_toggle(
+    State(state): State<AppState>,
+    Extension(cid): Extension<CorrelationId>,
+    body: Option<Json<BulkIdsToggleRequest>>,
+) -> Response {
+    let Some(Json(body)) = body else {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_body", "JSON body required", cid.as_str());
+    };
+    if body.ids.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "validation_failed",
+            "ids must be a non-empty array",
+            cid.as_str(),
+        );
+    }
+    if body.ids.len() > MAX_BULK {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "validation_failed",
+            format!("bulk operations are limited to {} items", MAX_BULK),
+            cid.as_str(),
+        );
+    }
+    let now = iso_now();
+    match store::toggle_hosts_many(&state.db, &body.ids, body.enabled, &now).await {
+        Ok(affected) => {
+            audit::append(
+                state.db.clone(),
+                "host",
+                "bulk",
+                "bulk_toggle",
+                cid.as_str(),
+                Some(json!({ "ids": body.ids, "enabled": body.enabled })),
+            );
+            for id in &body.ids {
+                if let Ok(Some(host)) = store::get_host(&state.db, id).await {
+                    broadcast_host_changed(&state, host, "bulk_toggle");
+                }
+            }
+            Json(json!({ "affected": affected, "enabled": body.enabled })).into_response()
+        }
         Err(e) => server_error(e, &cid),
     }
 }

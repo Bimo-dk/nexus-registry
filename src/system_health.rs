@@ -156,7 +156,7 @@ pub async fn run_cycle(state: &AppState) -> SystemHealthSnapshot {
     });
     let sys_checks = join_all(sys_futures).await;
 
-    let remotes = store::list(&state.db).await.unwrap_or_default();
+    let (remotes, _) = store::list(&state.db, None).await.unwrap_or_default();
     let mut enabled_count = 0usize;
     let mut disabled_count = 0usize;
     for r in &remotes {

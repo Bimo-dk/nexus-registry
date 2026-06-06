@@ -12,39 +12,77 @@ use tracing::{error, info};
 use crate::correlation::CorrelationId;
 use crate::http_error::error_response;
 use crate::state::AppState;
-use crate::store::{self, StoreError};
+use crate::store::{self, audit, versions, ListPage, StoreError};
 use crate::time::iso_now;
-use crate::types::{AddRemoteRequest, RegistryResponse, RemoteConfig, UpdateRemoteRequest};
+use crate::types::{
+    AddRemoteRequest, BulkDeleteRequest, BulkToggleRequest, RegistryResponse, RemoteConfig,
+    UpdateRemoteRequest,
+};
 use crate::validators::{is_valid_remote_name, is_valid_route_path, is_valid_url_or_path, parse_visibility};
 use crate::ws::broadcast_remotes_changed;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list).post(create))
+        .route("/bulk-toggle", post(bulk_toggle))
+        .route("/bulk-delete", post(bulk_delete))
         .route("/{name}", get(detail).put(update).delete(remove))
         .route("/{name}/toggle", post(toggle))
         .route("/{name}/redeploy", post(redeploy))
+        .route("/{name}/versions", get(list_versions))
+        .route("/{name}/rollback", post(rollback))
 }
+
+const MAX_PAGE_SIZE: u32 = 200;
+const MAX_BULK: usize = 100;
 
 #[derive(Deserialize)]
 struct ListQuery {
     #[serde(rename = "host_id")]
     host_id: Option<String>,
+    page: Option<u32>,
+    limit: Option<u32>,
+}
+
+fn parse_page(q_page: Option<u32>, q_limit: Option<u32>) -> Option<ListPage> {
+    match (q_page, q_limit) {
+        (None, None) => None,
+        (pg, lim) => {
+            let limit = lim.unwrap_or(50).clamp(1, MAX_PAGE_SIZE) as u64;
+            let page = pg.unwrap_or(1).max(1) as u64;
+            Some(ListPage { limit, offset: (page - 1) * limit })
+        }
+    }
+}
+
+fn pagination_fields(lp: &Option<ListPage>, total: u64) -> (Option<u32>, Option<u32>, Option<u32>) {
+    match lp {
+        None => (None, None, None),
+        Some(p) => {
+            let page_num = (p.offset / p.limit + 1) as u32;
+            let page_count = if p.limit > 0 { ((total + p.limit - 1) / p.limit) as u32 } else { 0 };
+            (Some(page_num), Some(p.limit as u32), Some(page_count))
+        }
+    }
 }
 
 async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> Response {
+    let lp = parse_page(q.page, q.limit);
     let result = match q.host_id.as_deref() {
-        Some(host_id) => store::list_for_host(&state.db, host_id).await,
-        None => store::list(&state.db).await,
+        Some(host_id) => store::list_for_host(&state.db, host_id, lp.as_ref()).await,
+        None => store::list(&state.db, lp.as_ref()).await,
     };
     match result {
-        Ok(remotes) => {
+        Ok((remotes, total)) => {
             let enabled = remotes.iter().filter(|r| r.enabled).count();
-            let total = remotes.len();
+            let (page, page_size, page_count) = pagination_fields(&lp, total);
             Json(RegistryResponse {
                 remotes,
-                total,
+                total: total as usize,
                 enabled,
+                page,
+                page_size,
+                page_count,
             })
             .into_response()
         }
@@ -139,6 +177,8 @@ async fn create(
     match store::insert(&state.db, &remote).await {
         Ok(()) => {
             let trigger = format!("add:{}", remote.name);
+            audit::append(state.db.clone(), "remote", &remote.name, "created", cid.as_str(), None);
+            versions::record(&state.db, &remote).await;
             let res = (StatusCode::CREATED, Json(remote)).into_response();
             broadcast_remotes_changed(&state, trigger).await;
             res
@@ -207,6 +247,8 @@ async fn update(
     match store::update(&state.db, &name, body).await {
         Ok(Some(remote)) => {
             let trigger = format!("update:{}", remote.name);
+            audit::append(state.db.clone(), "remote", &remote.name, "updated", cid.as_str(), None);
+            versions::record(&state.db, &remote).await;
             let res = Json(remote).into_response();
             broadcast_remotes_changed(&state, trigger).await;
             res
@@ -229,6 +271,7 @@ async fn remove(
     match store::delete(&state.db, &name).await {
         Ok(true) => {
             let trigger = format!("delete:{}", name);
+            audit::append(state.db.clone(), "remote", &name, "deleted", cid.as_str(), None);
             let res = StatusCode::NO_CONTENT.into_response();
             broadcast_remotes_changed(&state, trigger).await;
             res
@@ -251,6 +294,7 @@ async fn toggle(
     match store::toggle(&state.db, &name).await {
         Ok(Some(remote)) => {
             let trigger = format!("toggle:{}", remote.name);
+            audit::append(state.db.clone(), "remote", &remote.name, "toggled", cid.as_str(), None);
             let res = Json(remote).into_response();
             broadcast_remotes_changed(&state, trigger).await;
             res
@@ -279,6 +323,7 @@ async fn redeploy(
                 remote.name,
                 ts
             );
+            audit::append(state.db.clone(), "remote", &remote.name, "redeployed", cid.as_str(), None);
             (
                 StatusCode::ACCEPTED,
                 Json(json!({
@@ -295,6 +340,159 @@ async fn redeploy(
             StatusCode::NOT_FOUND,
             "not_found",
             format!("Remote \"{}\" not found", name),
+            cid.as_str(),
+        ),
+        Err(e) => server_error(e, cid.as_str()),
+    }
+}
+
+async fn bulk_toggle(
+    State(state): State<AppState>,
+    Extension(cid): Extension<CorrelationId>,
+    body: Option<Json<BulkToggleRequest>>,
+) -> Response {
+    let Some(Json(body)) = body else {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_body", "JSON body required", cid.as_str());
+    };
+    if body.names.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "validation_failed",
+            "names must be a non-empty array",
+            cid.as_str(),
+        );
+    }
+    if body.names.len() > MAX_BULK {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "validation_failed",
+            format!("bulk operations are limited to {} items", MAX_BULK),
+            cid.as_str(),
+        );
+    }
+    match store::toggle_many(&state.db, &body.names, body.enabled).await {
+        Ok(affected) => {
+            audit::append(
+                state.db.clone(),
+                "remote",
+                "bulk",
+                "bulk_toggle",
+                cid.as_str(),
+                Some(json!({ "names": body.names, "enabled": body.enabled })),
+            );
+            broadcast_remotes_changed(&state, "bulk_toggle").await;
+            Json(json!({ "affected": affected, "enabled": body.enabled })).into_response()
+        }
+        Err(e) => server_error(e, cid.as_str()),
+    }
+}
+
+async fn bulk_delete(
+    State(state): State<AppState>,
+    Extension(cid): Extension<CorrelationId>,
+    body: Option<Json<BulkDeleteRequest>>,
+) -> Response {
+    let Some(Json(body)) = body else {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_body", "JSON body required", cid.as_str());
+    };
+    if body.names.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "validation_failed",
+            "names must be a non-empty array",
+            cid.as_str(),
+        );
+    }
+    if body.names.len() > MAX_BULK {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "validation_failed",
+            format!("bulk operations are limited to {} items", MAX_BULK),
+            cid.as_str(),
+        );
+    }
+    match store::delete_many(&state.db, &body.names).await {
+        Ok(affected) => {
+            audit::append(
+                state.db.clone(),
+                "remote",
+                "bulk",
+                "bulk_delete",
+                cid.as_str(),
+                Some(json!({ "names": body.names })),
+            );
+            broadcast_remotes_changed(&state, "bulk_delete").await;
+            Json(json!({ "affected": affected })).into_response()
+        }
+        Err(e) => server_error(e, cid.as_str()),
+    }
+}
+
+async fn list_versions(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Extension(cid): Extension<CorrelationId>,
+) -> Response {
+    match store::get(&state.db, &name).await {
+        Ok(None) => return error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("Remote \"{}\" not found", name),
+            cid.as_str(),
+        ),
+        Err(e) => return server_error(e, cid.as_str()),
+        Ok(Some(_)) => {}
+    }
+    match versions::list_for_remote(&state.db, &name).await {
+        Ok(vers) => {
+            let total = vers.len();
+            Json(json!({ "remote": name, "versions": vers, "total": total })).into_response()
+        }
+        Err(e) => server_error(e, cid.as_str()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RollbackRequest {
+    version: u32,
+}
+
+async fn rollback(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Extension(cid): Extension<CorrelationId>,
+    body: Option<Json<RollbackRequest>>,
+) -> Response {
+    let Some(Json(body)) = body else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+            "JSON body required",
+            cid.as_str(),
+        );
+    };
+    match versions::restore(&state.db, &name, body.version).await {
+        Ok(Some((remote, restored_version))) => {
+            audit::append(
+                state.db.clone(),
+                "remote",
+                &name,
+                "rollback",
+                cid.as_str(),
+                Some(json!({ "toVersion": restored_version })),
+            );
+            versions::record(&state.db, &remote).await;
+            let res = Json(remote).into_response();
+            broadcast_remotes_changed(&state, format!("rollback:{}", name)).await;
+            res
+        }
+        Ok(None) => error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!(
+                "Remote \"{}\" or version {} not found",
+                name, body.version
+            ),
             cid.as_str(),
         ),
         Err(e) => server_error(e, cid.as_str()),

@@ -13,6 +13,7 @@ use axum::{http::StatusCode, routing::post};
 
 use crate::observability::log_buffer::LogLevel;
 use crate::state::AppState;
+use crate::store::audit::{self, AuditQuery};
 use crate::system_health::run_cycle;
 use crate::ws::connection_count;
 
@@ -22,6 +23,7 @@ pub fn router() -> Router<AppState> {
         .route("/config", get(config))
         .route("/logs", get(logs))
         .route("/metrics", get(metrics))
+        .route("/audit", get(audit_log))
         .route("/shutdown", post(shutdown))
 }
 
@@ -111,4 +113,35 @@ async fn metrics(State(state): State<AppState>) -> Response {
     extra.insert("dbPoolIdle".to_string(), state.db.num_idle() as u64);
     snapshot.counters.extend(extra);
     Json(snapshot).into_response()
+}
+
+#[derive(Deserialize)]
+struct AuditQueryParams {
+    entity_type: Option<String>,
+    entity_id: Option<String>,
+    action: Option<String>,
+    before: Option<String>,
+    limit: Option<u64>,
+}
+
+async fn audit_log(State(state): State<AppState>, Query(q): Query<AuditQueryParams>) -> Response {
+    let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+    let query = AuditQuery {
+        entity_type: q.entity_type,
+        entity_id: q.entity_id,
+        action: q.action,
+        before: q.before,
+        limit,
+    };
+    match audit::query(&state.db, &query).await {
+        Ok(entries) => {
+            let total = entries.len();
+            Json(json!({ "entries": entries, "total": total })).into_response()
+        }
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "internal_server_error", "message": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
