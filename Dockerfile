@@ -31,25 +31,40 @@ RUN apk add --no-cache wget ca-certificates
 ENV BIND_ADDRESS=0.0.0.0
 ENV PORT=8670
 
-# Authentication (REQUIRED — empty token rejects every authenticated request)
+# Authentication
+#   NEXUS_TOKEN        REQUIRED. Empty value rejects every authenticated request.
+#   NEXUS_TOKEN_PEPPER REQUIRED in production. Used as HMAC pepper when hashing
+#                      stored tokens. Leaving the default pepper logs a warning
+#                      on every boot — set this to a strong random string and
+#                      keep it stable across rotations.
 ENV NEXUS_TOKEN=
+ENV NEXUS_TOKEN_PEPPER=
 
 # CORS — comma-separated list of allowed origins, or "*" / empty for any
 ENV ALLOWED_ORIGINS=
 
 # Persistence
 #   DATABASE_URL takes precedence. If unset, registry uses sqlite at
-#   "${DATA_DIR}/registry.db". Path can point at any mounted volume.
+#   "${DATA_DIR}/registry.db". Mount /app/data as a volume to persist.
 ENV DATA_DIR=/app/data
 ENV DATABASE_URL=
 
 # Health-check loop
+#   SYSTEM_SERVICES is a comma-separated list of "name=health_url" pairs
+#   probed every HEALTH_CHECK_INTERVAL_MS. Surfaced via /api/system/health.
 ENV HEALTH_CHECK_INTERVAL_MS=30000
-ENV SYSTEM_SERVICES=gateway=http://gateway/health,host=http://host/health
+ENV SYSTEM_SERVICES=gateway=http://gateway:8668/health,host=http://host/health
 
 # Observability
+#   LOG_BUFFER_CAPACITY — ring-buffered log entries surfaced via /api/system/logs
+#                         and the live WebSocket "log" subscription.
+#   NODE_ENV            — free-form environment label exposed via /api/system/config.
+#                         Common values: development, staging, production.
+#   RUST_LOG            — tracing-subscriber EnvFilter directive
+#                         (e.g. "info", "info,nexus_registry=debug").
 ENV LOG_BUFFER_CAPACITY=500
 ENV NODE_ENV=production
+ENV RUST_LOG=info
 # ----------------------------------------------------------------------------
 
 WORKDIR /app
