@@ -63,10 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let db_cfg = DatabaseConfig::resolve(&env, &env.data_dir)
         .map_err(|e| format!("[registry] database configuration error: {e}"))?;
-    info!(
-        "[registry] Connecting to {} database",
-        db_cfg.dialect.as_str()
-    );
+    info!("[registry] Connecting to {} database", db_cfg.dialect.as_str());
     let db = store::init(&db_cfg, &env.data_dir).await?;
     let initial = store::list(&db).await?;
     info!(

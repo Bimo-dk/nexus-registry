@@ -214,22 +214,19 @@ impl ConfigStore {
 // builds the right tail clause so each save_* function only writes the column
 // list once and lets the dialect pick the upsert syntax.
 fn upsert(dialect: Dialect, table: &str, columns: &[&str]) -> String {
-    let placeholders = std::iter::repeat("?").take(columns.len()).collect::<Vec<_>>().join(", ");
+    let placeholders = std::iter::repeat("?")
+        .take(columns.len())
+        .collect::<Vec<_>>()
+        .join(", ");
     let col_list = columns.join(", ");
     let updatable: Vec<&&str> = columns.iter().filter(|c| **c != "id").collect();
     let tail = match dialect {
         Dialect::Sqlite | Dialect::Postgres => {
-            let assigns: Vec<String> = updatable
-                .iter()
-                .map(|c| format!("{c} = excluded.{c}"))
-                .collect();
+            let assigns: Vec<String> = updatable.iter().map(|c| format!("{c} = excluded.{c}")).collect();
             format!("ON CONFLICT(id) DO UPDATE SET {}", assigns.join(", "))
         }
         Dialect::MySql => {
-            let assigns: Vec<String> = updatable
-                .iter()
-                .map(|c| format!("{c} = VALUES({c})"))
-                .collect();
+            let assigns: Vec<String> = updatable.iter().map(|c| format!("{c} = VALUES({c})")).collect();
             format!("ON DUPLICATE KEY UPDATE {}", assigns.join(", "))
         }
     };
@@ -242,7 +239,9 @@ async fn load_rate_limiting(db: &Db) -> Result<RateLimitingConfig, sqlx::Error> 
     let sql = db.dialect.render(
         "SELECT enabled, requests_per_second, burst_size, by_field FROM rate_limiting_config WHERE id = 1",
     );
-    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_optional(db.pool()).await?;
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .fetch_optional(db.pool())
+        .await?;
     let cfg = match row {
         Some(r) => RateLimitingConfig {
             enabled: r.try_get::<i64, _>("enabled")? != 0,
@@ -282,7 +281,9 @@ async fn load_ws_reconnect(db: &Db) -> Result<WsReconnectConfig, sqlx::Error> {
         "SELECT initial_delay_ms, max_delay_ms, backoff_multiplier, jitter_ms, max_attempts \
          FROM ws_reconnect_config WHERE id = 1",
     );
-    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_optional(db.pool()).await?;
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .fetch_optional(db.pool())
+        .await?;
     let cfg = match row {
         Some(r) => WsReconnectConfig {
             initial_delay_ms: r.try_get::<i64, _>("initial_delay_ms")? as u64,
@@ -331,7 +332,9 @@ async fn load_circuit_breaker(db: &Db) -> Result<CircuitBreakerConfig, sqlx::Err
         "SELECT enabled, failure_threshold, success_threshold, open_duration_ms, half_open_max_calls \
          FROM circuit_breaker_config WHERE id = 1",
     );
-    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_optional(db.pool()).await?;
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .fetch_optional(db.pool())
+        .await?;
     let cfg = match row {
         Some(r) => CircuitBreakerConfig {
             enabled: r.try_get::<i64, _>("enabled")? != 0,
@@ -379,7 +382,9 @@ async fn load_graceful_shutdown(db: &Db) -> Result<GracefulShutdownConfig, sqlx:
     let sql = db
         .dialect
         .render("SELECT timeout_ms, ws_notice_ms FROM graceful_shutdown_config WHERE id = 1");
-    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_optional(db.pool()).await?;
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .fetch_optional(db.pool())
+        .await?;
     let cfg = match row {
         Some(r) => GracefulShutdownConfig {
             timeout_ms: r.try_get::<i64, _>("timeout_ms")? as u64,
@@ -415,7 +420,9 @@ async fn load_metrics(db: &Db) -> Result<MetricsConfig, sqlx::Error> {
         "SELECT prometheus_enabled, prometheus_path, require_auth, custom_labels \
          FROM metrics_config WHERE id = 1",
     );
-    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_optional(db.pool()).await?;
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .fetch_optional(db.pool())
+        .await?;
     let cfg = match row {
         Some(r) => {
             let labels_json: String = r.try_get("custom_labels")?;
@@ -467,7 +474,9 @@ async fn load_token(db: &Db) -> Result<Option<TokenRotationStored>, sqlx::Error>
         "SELECT active_token_hash, previous_token_hash, previous_token_expires_at \
          FROM token_rotation WHERE id = 1",
     );
-    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_optional(db.pool()).await?;
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .fetch_optional(db.pool())
+        .await?;
     Ok(row.map(|r| TokenRotationStored {
         active_token_hash: r.get("active_token_hash"),
         previous_token_hash: r.get("previous_token_hash"),
@@ -501,7 +510,9 @@ async fn load_gateway_protection(db: &Db) -> Result<GatewayProtectionConfig, sql
     let sql = db
         .dialect
         .render("SELECT config_json FROM gateway_protection_config WHERE id = 1");
-    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_optional(db.pool()).await?;
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .fetch_optional(db.pool())
+        .await?;
     let cfg = match row {
         Some(r) => {
             let json: String = r.try_get("config_json")?;
@@ -518,11 +529,7 @@ async fn load_gateway_protection(db: &Db) -> Result<GatewayProtectionConfig, sql
 
 async fn save_gateway_protection(db: &Db, cfg: &GatewayProtectionConfig) -> Result<(), sqlx::Error> {
     let json = serde_json::to_string(cfg).unwrap_or_else(|_| "{}".into());
-    let raw = upsert(
-        db.dialect,
-        "gateway_protection_config",
-        &["id", "config_json"],
-    );
+    let raw = upsert(db.dialect, "gateway_protection_config", &["id", "config_json"]);
     let sql = db.dialect.render(&raw);
     sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
         .bind(1_i64)

@@ -33,7 +33,9 @@ pub async fn list_hosts(db: &Db) -> Result<Vec<HostWithGateCount>, StoreError> {
                   h.enabled, h.created_at, h.updated_at \
          ORDER BY h.created_at",
     );
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_all(db.pool()).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .fetch_all(db.pool())
+        .await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let host = row_to_host(&r)?;
@@ -154,7 +156,9 @@ pub async fn update_host(
 }
 
 pub async fn gate_names_for_host(db: &Db, host_id: &str) -> Result<Vec<String>, StoreError> {
-    let sql = db.dialect.render("SELECT name FROM gates WHERE host_id = ? ORDER BY name");
+    let sql = db
+        .dialect
+        .render("SELECT name FROM gates WHERE host_id = ? ORDER BY name");
     let names: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_ref()))
         .bind(host_id)
         .fetch_all(db.pool())
@@ -276,7 +280,9 @@ const GATE_WITH_HOST_SELECT: &str =
 pub async fn list_gates(db: &Db) -> Result<Vec<GateWithHost>, StoreError> {
     let raw = format!("{} ORDER BY g.created_at", GATE_WITH_HOST_SELECT);
     let sql = db.dialect.render(&raw);
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_all(db.pool()).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .fetch_all(db.pool())
+        .await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         out.push(row_to_gate_with_host(&r)?);
@@ -285,10 +291,7 @@ pub async fn list_gates(db: &Db) -> Result<Vec<GateWithHost>, StoreError> {
 }
 
 pub async fn get_gate(db: &Db, id_or_name: &str) -> Result<Option<GateWithHost>, StoreError> {
-    let raw = format!(
-        "{} WHERE g.id = ? OR g.name = ? LIMIT 1",
-        GATE_WITH_HOST_SELECT
-    );
+    let raw = format!("{} WHERE g.id = ? OR g.name = ? LIMIT 1", GATE_WITH_HOST_SELECT);
     let sql = db.dialect.render(&raw);
     let row = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
         .bind(id_or_name)

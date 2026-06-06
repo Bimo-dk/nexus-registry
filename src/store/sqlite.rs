@@ -222,8 +222,7 @@ pub async fn init(cfg: &DatabaseConfig, data_dir: &Path) -> Result<Db, StoreErro
     // sqlite::memory: gives every pool connection its own private database,
     // so a pool of size N has N disjoint in-memory DBs. Pin to 1 to keep the
     // schema visible across queries during tests and ephemeral runs.
-    let max_connections = if matches!(cfg.dialect, Dialect::Sqlite) && connect_url.contains("memory")
-    {
+    let max_connections = if matches!(cfg.dialect, Dialect::Sqlite) && connect_url.contains("memory") {
         1
     } else {
         8
@@ -241,15 +240,11 @@ pub async fn init(cfg: &DatabaseConfig, data_dir: &Path) -> Result<Db, StoreErro
     if matches!(cfg.dialect, Dialect::Sqlite) {
         // Foreign-key enforcement is opt-in on SQLite. Postgres + MySQL enforce
         // by default.
-        sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(db.pool())
-            .await?;
+        sqlx::query("PRAGMA foreign_keys = ON").execute(db.pool()).await?;
         // Best-effort journal mode + sync — failures are non-fatal because
         // these PRAGMAs are no-ops for in-memory databases and some sqlx Any
         // wrappers reject the result rows.
-        let _ = sqlx::query("PRAGMA journal_mode = WAL")
-            .execute(db.pool())
-            .await;
+        let _ = sqlx::query("PRAGMA journal_mode = WAL").execute(db.pool()).await;
         let _ = sqlx::query("PRAGMA synchronous = NORMAL")
             .execute(db.pool())
             .await;
@@ -381,8 +376,13 @@ pub async fn list(db: &Db) -> Result<Vec<RemoteConfig>, StoreError> {
         "SELECT name, url, exposed_module, route_path, enabled, added_at, upstream_url, \
          health_status, last_health_check, visibility FROM remotes ORDER BY added_at",
     );
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).fetch_all(db.pool()).await?;
-    rows.iter().map(row_to_remote).collect::<Result<_, _>>().map_err(Into::into)
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .fetch_all(db.pool())
+        .await?;
+    rows.iter()
+        .map(row_to_remote)
+        .collect::<Result<_, _>>()
+        .map_err(Into::into)
 }
 
 /// Returns global remotes plus host-specific remotes for the given host id.
@@ -397,7 +397,10 @@ pub async fn list_for_host(db: &Db, host_id: &str) -> Result<Vec<RemoteConfig>, 
         .bind(&host_visibility)
         .fetch_all(db.pool())
         .await?;
-    rows.iter().map(row_to_remote).collect::<Result<_, _>>().map_err(Into::into)
+    rows.iter()
+        .map(row_to_remote)
+        .collect::<Result<_, _>>()
+        .map_err(Into::into)
 }
 
 pub async fn get(db: &Db, name: &str) -> Result<Option<RemoteConfig>, StoreError> {
@@ -514,7 +517,10 @@ pub async fn update(
 
 pub async fn delete(db: &Db, name: &str) -> Result<bool, StoreError> {
     let sql = db.dialect.render("DELETE FROM remotes WHERE name = ?");
-    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref())).bind(name).execute(db.pool()).await?;
+    let res = sqlx::query(sqlx::AssertSqlSafe(sql.as_ref()))
+        .bind(name)
+        .execute(db.pool())
+        .await?;
     Ok(res.rows_affected() > 0)
 }
 
