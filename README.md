@@ -4,6 +4,7 @@ Source of truth for a Nexus deployment. Rust binary (axum + sqlx + tokio) — ow
 
 - Image: [`ghcr.io/bimo-dk/nexus-registry`](https://github.com/Bimo-dk/nexus-registry/pkgs/container/nexus-registry)
 - Listens on: `:8670` (HTTP + WebSocket)
+- Trust boundary: **internal-only.** The registry is never exposed to the public internet — only the gateway and portal bind public ports. See [security — Network trust boundary](https://nexus.bimo.dk/reference/security#network-trust-boundary).
 - Persistence: **SQLite, PostgreSQL, MySQL or MariaDB** — see [Choosing a database](#choosing-a-database)
 - Docs: [Tenant-facing overview](https://nexus.bimo.dk/infrastructure/infra-registry) · [Internals — architecture](https://nexus.bimo.dk/internals/nexus-registry/architecture) · [code map](https://nexus.bimo.dk/internals/nexus-registry/code-map)
 
