@@ -7,6 +7,9 @@ RUN apk add --no-cache musl-dev gcc
 
 WORKDIR /app
 
+ENV CARGO_HTTP_MULTIPLEXING=false
+ENV CARGO_NET_RETRY=5
+
 COPY Cargo.toml ./
 COPY src ./src
 

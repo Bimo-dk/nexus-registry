@@ -9,6 +9,11 @@ RUN apk add --no-cache musl-dev gcc
 
 WORKDIR /app
 
+# Force HTTP/1.1 against crates.io. Cargo's HTTP/2 multiplexer occasionally
+# fails inside Docker BuildKit with `Error in the HTTP2 framing layer`.
+ENV CARGO_HTTP_MULTIPLEXING=false
+ENV CARGO_NET_RETRY=5
+
 COPY Cargo.toml ./
 COPY src ./src
 
