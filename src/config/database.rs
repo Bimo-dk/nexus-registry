@@ -83,7 +83,11 @@ impl DatabaseConfig {
     }
 
     fn from_url(raw: &str) -> Result<Self, String> {
-        let scheme = raw.split_once(':').map(|(s, _)| s).unwrap_or(raw).to_ascii_lowercase();
+        let scheme = raw
+            .split_once(':')
+            .map(|(s, _)| s)
+            .unwrap_or(raw)
+            .to_ascii_lowercase();
         match scheme.as_str() {
             "sqlite" => Ok(Self { url: raw.to_string(), dialect: Dialect::Sqlite }),
             "postgres" | "postgresql" => Ok(Self { url: raw.to_string(), dialect: Dialect::Postgres }),
@@ -110,24 +114,31 @@ impl DatabaseConfig {
         }
     }
 
-    fn assemble(
-        env: &EnvConfig,
-        scheme: &str,
-        dialect: Dialect,
-        default_port: u16,
-    ) -> Result<Self, String> {
+    fn assemble(env: &EnvConfig, scheme: &str, dialect: Dialect, default_port: u16) -> Result<Self, String> {
         if env.db_host.is_empty() {
-            return Err(format!("{scheme}: DB_HOST is required when DATABASE_URL is unset"));
+            return Err(format!(
+                "{scheme}: DB_HOST is required when DATABASE_URL is unset"
+            ));
         }
         if env.db_name.is_empty() {
-            return Err(format!("{scheme}: DB_NAME is required when DATABASE_URL is unset"));
+            return Err(format!(
+                "{scheme}: DB_NAME is required when DATABASE_URL is unset"
+            ));
         }
 
-        let port = if env.db_port == 0 { default_port } else { env.db_port };
+        let port = if env.db_port == 0 {
+            default_port
+        } else {
+            env.db_port
+        };
         let creds = if env.db_user.is_empty() {
             String::new()
         } else {
-            format!("{}:{}@", percent_encode(&env.db_user), percent_encode(&env.db_password))
+            format!(
+                "{}:{}@",
+                percent_encode(&env.db_user),
+                percent_encode(&env.db_password)
+            )
         };
 
         let mut url = format!(
